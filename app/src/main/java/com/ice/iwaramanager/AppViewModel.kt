@@ -7,6 +7,12 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ice.iwaramanager.data.model.LibraryLayoutMode
+import com.ice.iwaramanager.data.model.LibraryFolderNode
+import com.ice.iwaramanager.data.model.LibrarySource
+import com.ice.iwaramanager.data.model.LibrarySourceScope
+import com.ice.iwaramanager.data.model.LibrarySourceType
+import com.ice.iwaramanager.data.model.RemoteIndexMode
+import com.ice.iwaramanager.data.model.RemotePlaybackDiagnostic
 import com.ice.iwaramanager.data.local.entity.MatchTaskEntity
 import com.ice.iwaramanager.data.model.FilterTab
 import com.ice.iwaramanager.data.model.IwaraMatchMode
@@ -144,9 +150,30 @@ class AppViewModel(
         false
     )
 
+    private val initialSelectedSourceScopeKey = prefs.getString(
+        KEY_SELECTED_SOURCE_SCOPE,
+        ALL_SOURCES_KEY
+    ) ?: ALL_SOURCES_KEY
+
+    private val initialRemoteProxyIdleTimeoutSeconds = prefs.getInt(
+        KEY_REMOTE_PROXY_IDLE_TIMEOUT_SECONDS,
+        300
+    ).coerceIn(30, 3600)
+
+    private val initialRemoteProxyReadTimeoutSeconds = prefs.getInt(
+        KEY_REMOTE_PROXY_READ_TIMEOUT_SECONDS,
+        60
+    ).coerceIn(10, 300)
+
+    private val initialShowRemotePlaybackDiagnostics = prefs.getBoolean(
+        KEY_SHOW_REMOTE_PLAYBACK_DIAGNOSTICS,
+        true
+    )
+
     private val _libraryState = MutableStateFlow(
         LibraryUiState(
             folderUriString = initialFolderUriString,
+            selectedSourceScopeKey = initialSelectedSourceScopeKey,
             layoutMode = initialLayoutMode,
             gridColumns = initialGridColumns
         )
@@ -163,6 +190,11 @@ class AppViewModel(
     private val _settingsState = MutableStateFlow(
         SettingsUiState(
             folderUriString = initialFolderUriString,
+            remoteProxyIdleTimeoutSecondsText = initialRemoteProxyIdleTimeoutSeconds.toString(),
+            remoteProxyIdleTimeoutSeconds = initialRemoteProxyIdleTimeoutSeconds,
+            remoteProxyReadTimeoutSecondsText = initialRemoteProxyReadTimeoutSeconds.toString(),
+            remoteProxyReadTimeoutSeconds = initialRemoteProxyReadTimeoutSeconds,
+            showRemotePlaybackDiagnostics = initialShowRemotePlaybackDiagnostics,
             layoutMode = initialLayoutMode,
             gridColumns = initialGridColumns,
             showRematchButtonInList = initialShowRematchButtonInList,
@@ -214,9 +246,12 @@ class AppViewModel(
     private val _matchTaskDetailState = MutableStateFlow(MatchTaskDetailUiState())
     val matchTaskDetailState: StateFlow<MatchTaskDetailUiState> = _matchTaskDetailState
 
+    private var observeSourcesJob: Job? = null
     private var observeLibraryJob: Job? = null
     private var observeSearchJob: Job? = null
     private var observeFilteredJob: Job? = null
+    private var observeDirectoryFoldersJob: Job? = null
+    private var observeDirectoryVideosJob: Job? = null
     private var observeCountsJob: Job? = null
     private var observeTasksJob: Job? = null
     private var observeTaskCountsJob: Job? = null
@@ -226,9 +261,9 @@ class AppViewModel(
 
     init {
         recoverInterruptedMatchTasks()
-        if (!initialFolderUriString.isNullOrBlank()) {
-            observeLibrary()
-            observeFiltersAndTasks()
+        viewModelScope.launch {
+            videoRepository.ensureLegacyLocalSource(initialFolderUriString)
+            observeSources()
         }
     }
 
@@ -248,42 +283,83 @@ class AppViewModel(
             )
         }
 
-        val uriString = uri.toString()
-
-        prefs.edit()
-            .putString(KEY_FOLDER_URI, uriString)
-            .apply()
-
-        _libraryState.update {
-            it.copy(
-                folderUriString = uriString,
-                error = null
-            )
+        viewModelScope.launch {
+            runCatching {
+                val source = videoRepository.addOrUpdateLocalSource(uri)
+                prefs.edit()
+                    .putString(KEY_FOLDER_URI, source.rootUriString)
+                    .putString(KEY_SELECTED_SOURCE_SCOPE, sourceScopeKey(source.id))
+                    .apply()
+                _libraryState.update {
+                    it.copy(
+                        folderUriString = source.id,
+                        selectedSourceScopeKey = sourceScopeKey(source.id),
+                        currentDirectorySourceId = source.id,
+                        currentDirectoryPath = "",
+                        error = null
+                    )
+                }
+                _searchState.update { it.copy(folderUriString = source.id, error = null) }
+                _settingsState.update { it.copy(folderUriString = source.rootUriString, error = null) }
+                scanSource(source.id)
+            }.onFailure { error ->
+                _settingsState.update { it.copy(error = error.message ?: "添加目录失败") }
+                _libraryState.update { it.copy(error = error.message ?: "添加目录失败") }
+            }
         }
-
-        _searchState.update {
-            it.copy(
-                folderUriString = uriString,
-                error = null
-            )
-        }
-
-        _settingsState.update {
-            it.copy(
-                folderUriString = uriString,
-                error = null
-            )
-        }
-
-        observeLibrary()
-        observeFiltersAndTasks()
-        observeSearchIfNeeded()
-        scanFolder(uri)
     }
 
     fun rescanLibrary() {
-        val folder = _libraryState.value.folderUriString ?: return
-        scanFolder(Uri.parse(folder))
+        val sources = _libraryState.value.librarySources
+        if (sources.isEmpty()) return
+        scanSources(currentSourceIds())
+    }
+
+    fun selectSourceScope(key: String) {
+        val scopes = _libraryState.value.sourceScopes
+        val selected = scopes.firstOrNull { it.key == key } ?: scopes.firstOrNull() ?: return
+        prefs.edit().putString(KEY_SELECTED_SOURCE_SCOPE, selected.key).apply()
+        val concreteSourceId = selected.sourceIds.singleOrNull()
+        _libraryState.update {
+            it.copy(
+                selectedSourceScopeKey = selected.key,
+                folderUriString = selected.key,
+                currentDirectorySourceId = concreteSourceId,
+                currentDirectoryPath = selected.folderPath.orEmpty(),
+                selectedTagKeys = emptySet(),
+                selectedAuthorKeys = emptySet(),
+                selectedQualities = emptySet()
+            )
+        }
+        _searchState.update { it.copy(folderUriString = selected.key) }
+        observeLibrary()
+        observeFiltersAndTasks()
+        observeSearchIfNeeded()
+        observeDirectory()
+    }
+
+    fun openDirectory(folder: LibraryFolderNode) {
+        _libraryState.update {
+            it.copy(
+                currentDirectorySourceId = folder.sourceId,
+                currentDirectoryPath = folder.path
+            )
+        }
+        observeDirectory()
+    }
+
+    fun navigateDirectoryUp() {
+        val state = _libraryState.value
+        val path = state.currentDirectoryPath
+        if (path.isBlank()) {
+            val selectedScope = state.sourceScopes.firstOrNull { it.key == state.selectedSourceScopeKey }
+            if (selectedScope?.sourceIds?.size == 1) return
+            _libraryState.update { it.copy(currentDirectorySourceId = null, currentDirectoryPath = "") }
+        } else {
+            val parent = path.substringBeforeLast('/', missingDelimiterValue = "")
+            _libraryState.update { it.copy(currentDirectoryPath = parent) }
+        }
+        observeDirectory()
     }
 
     fun updateSearchQuery(query: String) {
@@ -315,8 +391,24 @@ class AppViewModel(
     }
 
     fun openVideoPlayer(video: VideoItem) {
+        val source = _libraryState.value.librarySources.firstOrNull { it.id == video.sourceId }
+        val headers = if (source?.type == LibrarySourceType.WebDav) {
+            videoRepository.webDavPlaybackHeaders(source)
+        } else {
+            emptyMap()
+        }
+        val diagnostic = if (source?.type == LibrarySourceType.WebDav && headers.isEmpty() && !source.webDavUsername.isNullOrBlank()) {
+            RemotePlaybackDiagnostic("WebDAV 需要认证，但未找到已保存的密码")
+        } else {
+            null
+        }
         _playerState.update {
-            it.copy(video = video)
+            it.copy(
+                video = video,
+                playbackUriString = video.uriString,
+                requestHeaders = headers,
+                diagnostic = diagnostic
+            )
         }
     }
 
@@ -564,6 +656,170 @@ class AppViewModel(
         _settingsState.update { it.copy(autoMatchSkipNoId = enabled) }
     }
 
+    fun updateWebDavName(value: String) {
+        _settingsState.update { it.copy(webDavForm = it.webDavForm.copy(name = value)) }
+    }
+
+    fun updateWebDavBaseUrl(value: String) {
+        _settingsState.update { it.copy(webDavForm = it.webDavForm.copy(baseUrl = value)) }
+    }
+
+    fun updateWebDavRootPath(value: String) {
+        _settingsState.update { it.copy(webDavForm = it.webDavForm.copy(rootPath = value)) }
+    }
+
+    fun updateWebDavUsername(value: String) {
+        _settingsState.update { it.copy(webDavForm = it.webDavForm.copy(username = value)) }
+    }
+
+    fun updateWebDavPassword(value: String) {
+        _settingsState.update { it.copy(webDavForm = it.webDavForm.copy(password = value)) }
+    }
+
+    fun setWebDavIndexMode(mode: RemoteIndexMode) {
+        _settingsState.update { it.copy(webDavForm = it.webDavForm.copy(indexMode = mode)) }
+    }
+
+    fun setWebDavConnectTimeoutSeconds(raw: String) {
+        val value = raw.toIntOrNull()?.coerceIn(5, 120)
+        _settingsState.update {
+            it.copy(
+                webDavForm = if (value == null) {
+                    it.webDavForm.copy(connectTimeoutSecondsText = raw)
+                } else {
+                    it.webDavForm.copy(
+                        connectTimeoutSecondsText = value.toString(),
+                        connectTimeoutSeconds = value
+                    )
+                }
+            )
+        }
+    }
+
+    fun setWebDavReadTimeoutSeconds(raw: String) {
+        val value = raw.toIntOrNull()?.coerceIn(5, 180)
+        _settingsState.update {
+            it.copy(
+                webDavForm = if (value == null) {
+                    it.webDavForm.copy(readTimeoutSecondsText = raw)
+                } else {
+                    it.webDavForm.copy(
+                        readTimeoutSecondsText = value.toString(),
+                        readTimeoutSeconds = value
+                    )
+                }
+            )
+        }
+    }
+
+    fun testWebDavSource() {
+        val form = _settingsState.value.webDavForm
+        viewModelScope.launch {
+            _settingsState.update { it.copy(message = null, error = null) }
+            runCatching {
+                videoRepository.testWebDavConnection(
+                    name = form.name,
+                    baseUrl = form.baseUrl,
+                    rootPath = form.rootPath,
+                    username = form.username,
+                    password = form.password,
+                    indexMode = form.indexMode,
+                    connectTimeoutSeconds = form.connectTimeoutSeconds,
+                    readTimeoutSeconds = form.readTimeoutSeconds
+                )
+            }.onSuccess { message ->
+                _settingsState.update { it.copy(message = message, error = null) }
+            }.onFailure { error ->
+                _settingsState.update { it.copy(error = error.message ?: "WebDAV 连接失败") }
+            }
+        }
+    }
+
+    fun addWebDavSource() {
+        val form = _settingsState.value.webDavForm
+        viewModelScope.launch {
+            _settingsState.update { it.copy(message = null, error = null) }
+            runCatching {
+                val source = videoRepository.addWebDavSource(
+                    name = form.name,
+                    baseUrl = form.baseUrl,
+                    rootPath = form.rootPath,
+                    username = form.username,
+                    password = form.password,
+                    indexMode = form.indexMode,
+                    connectTimeoutSeconds = form.connectTimeoutSeconds,
+                    readTimeoutSeconds = form.readTimeoutSeconds
+                )
+                prefs.edit().putString(KEY_SELECTED_SOURCE_SCOPE, sourceScopeKey(source.id)).apply()
+                _libraryState.update {
+                    it.copy(
+                        selectedSourceScopeKey = sourceScopeKey(source.id),
+                        currentDirectorySourceId = source.id,
+                        currentDirectoryPath = ""
+                    )
+                }
+                scanSource(source.id)
+                source
+            }.onSuccess { source ->
+                _settingsState.update {
+                    it.copy(
+                        webDavForm = it.webDavForm.copy(password = ""),
+                        message = "已添加 WebDAV：${source.name}",
+                        error = null
+                    )
+                }
+            }.onFailure { error ->
+                _settingsState.update { it.copy(error = error.message ?: "添加 WebDAV 失败") }
+            }
+        }
+    }
+
+    fun deleteLibrarySource(sourceId: String) {
+        viewModelScope.launch {
+            runCatching { videoRepository.deleteSource(sourceId) }
+                .onSuccess {
+                    _settingsState.update { it.copy(message = "已删除来源", error = null) }
+                    if (_libraryState.value.selectedSourceScopeKey == sourceScopeKey(sourceId)) {
+                        selectSourceScope(ALL_SOURCES_KEY)
+                    }
+                }
+                .onFailure { error -> _settingsState.update { it.copy(error = error.message ?: "删除来源失败") } }
+        }
+    }
+
+    fun scanLibrarySource(sourceId: String) {
+        scanSource(sourceId)
+    }
+
+    fun setRemoteProxyIdleTimeoutSeconds(raw: String) {
+        val value = raw.toIntOrNull()?.coerceIn(30, 3600)
+        _settingsState.update {
+            if (value == null) {
+                it.copy(remoteProxyIdleTimeoutSecondsText = raw)
+            } else {
+                prefs.edit().putInt(KEY_REMOTE_PROXY_IDLE_TIMEOUT_SECONDS, value).apply()
+                it.copy(remoteProxyIdleTimeoutSecondsText = value.toString(), remoteProxyIdleTimeoutSeconds = value)
+            }
+        }
+    }
+
+    fun setRemoteProxyReadTimeoutSeconds(raw: String) {
+        val value = raw.toIntOrNull()?.coerceIn(10, 300)
+        _settingsState.update {
+            if (value == null) {
+                it.copy(remoteProxyReadTimeoutSecondsText = raw)
+            } else {
+                prefs.edit().putInt(KEY_REMOTE_PROXY_READ_TIMEOUT_SECONDS, value).apply()
+                it.copy(remoteProxyReadTimeoutSecondsText = value.toString(), remoteProxyReadTimeoutSeconds = value)
+            }
+        }
+    }
+
+    fun setShowRemotePlaybackDiagnostics(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_SHOW_REMOTE_PLAYBACK_DIAGNOSTICS, enabled).apply()
+        _settingsState.update { it.copy(showRemotePlaybackDiagnostics = enabled) }
+    }
+
     fun setFilterTab(tab: FilterTab) {
         _libraryState.update { it.copy(filterTab = tab) }
     }
@@ -764,7 +1020,8 @@ class AppViewModel(
         query: String,
         sourceTaskId: Long? = null
     ) {
-        val root = _libraryState.value.folderUriString ?: return
+        val root = video.sourceId.ifBlank { currentSourceIds().firstOrNull().orEmpty() }
+        if (root.isBlank()) return
         val existingTask = sourceTaskId
             ?.let { videoRepository.getMatchTask(it) }
             ?: videoRepository.getTasksByVideoUri(video.uriString).firstOrNull()
@@ -881,7 +1138,8 @@ class AppViewModel(
     }
 
     fun skipUnqueuedVideo(video: VideoItem) {
-        val root = _libraryState.value.folderUriString ?: return
+        val root = video.sourceId.ifBlank { currentSourceIds().firstOrNull().orEmpty() }
+        if (root.isBlank()) return
         viewModelScope.launch {
             val taskId = videoRepository.createMatchTask(
                 video = video,
@@ -924,12 +1182,7 @@ class AppViewModel(
 
     fun retryFailedMatchTasks() {
         viewModelScope.launch {
-            val root = _libraryState.value.folderUriString ?: return@launch
             val tasks = _libraryState.value.matchTasks.filter { it.status == MatchTaskStatus.Failed }
-                .ifEmpty {
-                    videoRepository.observeMatchTasksByStatuses(root, listOf(MatchTaskStatus.Failed))
-                    emptyList()
-                }
             tasks.forEach { retryMatchTask(it) }
         }
     }
@@ -937,10 +1190,10 @@ class AppViewModel(
     fun startBatchMatchUnmatched() {
         if (_libraryState.value.isBatchMatching) return
         viewModelScope.launch {
-            val root = _libraryState.value.folderUriString ?: return@launch
+            val sourceIds = currentSourceIds()
             _libraryState.update { it.copy(isBatchMatching = true, error = null) }
             try {
-                val videos = videoRepository.getUnqueuedUnmatchedVideos(root)
+                val videos = videoRepository.getUnqueuedUnmatchedVideosForSourceIds(sourceIds)
                 val semaphore = Semaphore(_settingsState.value.batchMatchThreads)
                 coroutineScope {
                     videos.map { video ->
@@ -948,7 +1201,7 @@ class AppViewModel(
                             semaphore.withPermit {
                                 val taskId = videoRepository.createMatchTask(
                                     video = video,
-                                    libraryRootUriString = root,
+                                    libraryRootUriString = video.sourceId,
                                     query = buildTaskQuery(video)
                                 )
                                 val task = videoRepository.getMatchTask(taskId) ?: return@withPermit
@@ -967,8 +1220,8 @@ class AppViewModel(
     fun startBatchRematchMatched() {
         if (_libraryState.value.isBatchMatching) return
         viewModelScope.launch {
-            val root = _libraryState.value.folderUriString ?: return@launch
-            val videos = videoRepository.getRematchableVideos(root)
+            val sourceIds = currentSourceIds()
+            val videos = videoRepository.getRematchableVideosForSourceIds(sourceIds)
             if (videos.isEmpty()) {
                 _libraryState.update {
                     it.copy(error = "没有可重新匹配的视频：需要已有 Iwara ID 或文件名能解析出 Iwara ID")
@@ -989,7 +1242,7 @@ class AppViewModel(
                                     ?: videoRepository.getMatchTask(
                                         videoRepository.createMatchTask(
                                             video = video,
-                                            libraryRootUriString = root,
+                                            libraryRootUriString = video.sourceId,
                                             query = query.ifBlank { buildMatchQuery(video) }
                                         )
                                     )
@@ -1076,187 +1329,127 @@ class AppViewModel(
     }
 
     fun clearLibraryFolder() {
-        val oldFolder = _libraryState.value.folderUriString
-
-        prefs.edit()
-            .remove(KEY_FOLDER_URI)
-            .apply()
-
-        observeLibraryJob?.cancel()
-        observeSearchJob?.cancel()
-        observeFilteredJob?.cancel()
-        observeCountsJob?.cancel()
-        observeTasksJob?.cancel()
-        observeTaskCountsJob?.cancel()
-        scanJob?.cancel()
-
-        _libraryState.update {
-            it.copy(
-                folderUriString = null,
-                videos = emptyList(),
-                filteredVideos = emptyList(),
-                matchTasks = emptyList(),
-                unqueuedVideos = emptyList(),
-                matchTaskFilterCounts = emptyMap(),
-                isScanning = false,
-                scanDone = 0,
-                scanTotal = 0,
-                scanCurrentName = null,
-                error = null
-            )
-        }
-
-        _searchState.update {
-            it.copy(
-                folderUriString = null,
-                query = "",
-                results = emptyList(),
-                error = null
-            )
-        }
-
-        _settingsState.update {
-            it.copy(
-                folderUriString = null,
-                isScanning = false,
-                videoCount = 0,
-                error = null
-            )
-        }
-
-        _detailState.update {
-            it.copy(video = null)
-        }
-
-        _playerState.update {
-            it.copy(video = null)
-        }
-
-        if (!oldFolder.isNullOrBlank()) {
-            viewModelScope.launch {
-                videoRepository.clearRoot(oldFolder)
-            }
-        }
-    }
-
-    private fun observeLibrary() {
-        val root = _libraryState.value.folderUriString ?: return
-
-        observeLibraryJob?.cancel()
-        observeLibraryJob = viewModelScope.launch {
-            videoRepository.observeVideos(root)
-                .collect { videos ->
-                    _libraryState.update {
-                        it.copy(videos = videos)
-                    }
-
-                    _settingsState.update {
-                        it.copy(videoCount = videos.size)
-                    }
-                }
-        }
-    }
-
-    private fun observeSearchIfNeeded() {
-        val root = _searchState.value.folderUriString ?: return
-        val query = _searchState.value.query.trim()
-
-        observeSearchJob?.cancel()
-
-        if (query.isBlank()) {
-            _searchState.update {
-                it.copy(
-                    results = emptyList(),
-                    error = null
-                )
-            }
-            return
-        }
-
-        observeSearchJob = viewModelScope.launch {
-            videoRepository.observeVideosBySearch(
-                libraryRootUriString = root,
-                query = query
-            ).collect { videos ->
-                _searchState.update {
-                    it.copy(
-                        results = videos,
-                        error = null
-                    )
-                }
-            }
-        }
-    }
-
-    private fun scanFolder(uri: Uri) {
-        scanJob?.cancel()
-
-        scanJob = viewModelScope.launch {
+        val sourceIds = currentSourceIds().ifEmpty { _libraryState.value.librarySources.map { it.id } }
+        viewModelScope.launch {
+            sourceIds.forEach { sourceId -> videoRepository.deleteSource(sourceId) }
             _libraryState.update {
                 it.copy(
-                    isScanning = true,
+                    videos = emptyList(),
+                    filteredVideos = emptyList(),
+                    directoryFolders = emptyList(),
+                    directoryVideos = emptyList(),
+                    matchTasks = emptyList(),
+                    unqueuedVideos = emptyList(),
+                    matchTaskFilterCounts = emptyMap(),
+                    isScanning = false,
                     scanDone = 0,
                     scanTotal = 0,
                     scanCurrentName = null,
                     error = null
                 )
             }
+            _searchState.update { it.copy(query = "", results = emptyList(), error = null) }
+            _detailState.update { it.copy(video = null) }
+            _playerState.update { it.copy(video = null, playbackUriString = null, requestHeaders = emptyMap()) }
+        }
+    }
 
-            _settingsState.update {
-                it.copy(
-                    isScanning = true,
-                    error = null
-                )
-            }
-
-            try {
-                videoRepository.scanAndSync(
-                    treeUri = uri,
-                    onProgress = { progress ->
-                        _libraryState.update {
-                            it.copy(
-                                scanDone = progress.done,
-                                scanTotal = progress.total,
-                                scanCurrentName = progress.currentName
-                            )
-                        }
-                    }
-                )
-
+    private fun observeSources() {
+        observeSourcesJob?.cancel()
+        observeSourcesJob = viewModelScope.launch {
+            videoRepository.observeSources().collectLatest { sources ->
+                val scopes = buildSourceScopes(sources)
+                val selectedKey = _libraryState.value.selectedSourceScopeKey
+                val fixedSelected = scopes.firstOrNull { it.key == selectedKey }?.key
+                    ?: scopes.firstOrNull()?.key
+                    ?: ALL_SOURCES_KEY
+                val concreteSourceId = scopes.firstOrNull { it.key == fixedSelected }?.sourceIds?.singleOrNull()
                 _libraryState.update {
                     it.copy(
-                        isScanning = false,
-                        scanCurrentName = null,
-                        error = null
+                        librarySources = sources,
+                        sourceScopes = scopes,
+                        selectedSourceScopeKey = fixedSelected,
+                        folderUriString = fixedSelected,
+                        currentDirectorySourceId = it.currentDirectorySourceId ?: concreteSourceId
                     )
                 }
-
                 _settingsState.update {
                     it.copy(
-                        isScanning = false,
-                        error = null
+                        librarySources = sources,
+                        folderUriString = sources.firstOrNull { source -> source.type == LibrarySourceType.LocalSaf }?.rootUriString,
+                        videoCount = _libraryState.value.videos.size
                     )
                 }
-
                 observeLibrary()
+                observeFiltersAndTasks()
                 observeSearchIfNeeded()
+                observeDirectory()
+            }
+        }
+    }
+
+    private fun observeLibrary() {
+        observeLibraryJob?.cancel()
+        observeLibraryJob = viewModelScope.launch {
+            videoRepository.observeVideosBySourceIds(currentSourceIds()).collect { videos ->
+                _libraryState.update { it.copy(videos = videos) }
+                _settingsState.update { it.copy(videoCount = videos.size) }
+            }
+        }
+    }
+
+    private fun observeSearchIfNeeded() {
+        val query = _searchState.value.query.trim()
+        observeSearchJob?.cancel()
+        if (query.isBlank()) {
+            _searchState.update { it.copy(results = emptyList(), error = null) }
+            return
+        }
+        observeSearchJob = viewModelScope.launch {
+            videoRepository.observeVideosBySearchForSourceIds(currentSourceIds(), query).collect { videos ->
+                _searchState.update { it.copy(results = videos, error = null) }
+            }
+        }
+    }
+
+    private fun scanSources(sourceIds: List<String>) {
+        scanJob?.cancel()
+        scanJob = viewModelScope.launch {
+            _libraryState.update { it.copy(isScanning = true, scanDone = 0, scanTotal = 0, scanCurrentName = null, error = null) }
+            _settingsState.update { it.copy(isScanning = true, error = null) }
+            try {
+                videoRepository.scanSources(sourceIds) { progress ->
+                    _libraryState.update {
+                        it.copy(scanDone = progress.done, scanTotal = progress.total, scanCurrentName = progress.currentName)
+                    }
+                }
+                _libraryState.update { it.copy(isScanning = false, scanCurrentName = null, error = null) }
+                _settingsState.update { it.copy(isScanning = false, error = null, message = "扫描完成") }
             } catch (e: Exception) {
                 val message = e.message ?: "扫描失败"
+                _libraryState.update { it.copy(isScanning = false, scanCurrentName = null, error = message) }
+                _settingsState.update { it.copy(isScanning = false, error = message) }
+            }
+        }
+    }
 
-                _libraryState.update {
-                    it.copy(
-                        isScanning = false,
-                        scanCurrentName = null,
-                        error = message
-                    )
+    private fun scanSource(sourceId: String) {
+        scanJob?.cancel()
+        scanJob = viewModelScope.launch {
+            _libraryState.update { it.copy(isScanning = true, scanDone = 0, scanTotal = 0, scanCurrentName = null, error = null) }
+            _settingsState.update { it.copy(isScanning = true, error = null) }
+            try {
+                videoRepository.scanSource(sourceId) { progress ->
+                    _libraryState.update {
+                        it.copy(scanDone = progress.done, scanTotal = progress.total, scanCurrentName = progress.currentName)
+                    }
                 }
-
-                _settingsState.update {
-                    it.copy(
-                        isScanning = false,
-                        error = message
-                    )
-                }
+                _libraryState.update { it.copy(isScanning = false, scanCurrentName = null, error = null) }
+                _settingsState.update { it.copy(isScanning = false, error = null, message = "扫描完成") }
+            } catch (e: Exception) {
+                val message = e.message ?: "扫描失败"
+                _libraryState.update { it.copy(isScanning = false, scanCurrentName = null, error = message) }
+                _settingsState.update { it.copy(isScanning = false, error = message) }
             }
         }
     }
@@ -1269,78 +1462,90 @@ class AppViewModel(
     }
 
     private fun observeFilteredVideos() {
-        val root = _libraryState.value.folderUriString ?: return
         val state = _libraryState.value
         observeFilteredJob?.cancel()
         observeFilteredJob = viewModelScope.launch {
-            videoRepository.observeVideosByFilters(
-                libraryRootUriString = root,
+            videoRepository.observeVideosByFiltersForSourceIds(
+                sourceIds = currentSourceIds(),
                 tagKeys = state.selectedTagKeys,
                 authorKeys = state.selectedAuthorKeys,
                 qualities = state.selectedQualities
-            ).collectLatest { videos ->
-                _libraryState.update { it.copy(filteredVideos = videos) }
-            }
+            ).collectLatest { videos -> _libraryState.update { it.copy(filteredVideos = videos) } }
         }
     }
 
     private fun observeFilterCounts() {
-        val root = _libraryState.value.folderUriString ?: return
         observeCountsJob?.cancel()
         observeCountsJob = viewModelScope.launch {
+            val sourceIds = currentSourceIds()
             kotlinx.coroutines.flow.combine(
-                videoRepository.observeTagCounts(root),
-                videoRepository.observeAuthorCounts(root),
-                videoRepository.observeQualityCounts(root)
-            ) { tags, authors, qualities ->
-                Triple(tags, authors, qualities)
-            }.collectLatest { (tags, authors, qualities) ->
-                _libraryState.update {
-                    it.copy(
-                        tagCounts = tags,
-                        authorCounts = authors,
-                        qualityCounts = qualities
-                    )
+                videoRepository.observeTagCountsForSourceIds(sourceIds),
+                videoRepository.observeAuthorCountsForSourceIds(sourceIds),
+                videoRepository.observeQualityCountsForSourceIds(sourceIds)
+            ) { tags, authors, qualities -> Triple(tags, authors, qualities) }
+                .collectLatest { (tags, authors, qualities) ->
+                    _libraryState.update { it.copy(tagCounts = tags, authorCounts = authors, qualityCounts = qualities) }
                 }
-            }
         }
     }
 
     private fun observeMatchTasks() {
-        val root = _libraryState.value.folderUriString ?: return
         observeTasksJob?.cancel()
         observeTasksJob = viewModelScope.launch {
+            val sourceIds = currentSourceIds()
             if (_libraryState.value.taskFilter == MatchTaskFilter.Unqueued) {
-                videoRepository.observeUnqueuedUnmatchedVideos(root).collectLatest { videos ->
-                    _libraryState.update {
-                        it.copy(
-                            unqueuedVideos = videos,
-                            matchTasks = emptyList()
-                        )
-                    }
+                videoRepository.observeUnqueuedUnmatchedVideosForSourceIds(sourceIds).collectLatest { videos ->
+                    _libraryState.update { it.copy(unqueuedVideos = videos, matchTasks = emptyList()) }
                 }
             } else {
-                videoRepository.observeMatchTasksByStatuses(
-                    root,
-                    statusesForFilter(_libraryState.value.taskFilter)
-                ).collectLatest { tasks ->
-                    _libraryState.update {
-                        it.copy(
-                            matchTasks = tasks,
-                            unqueuedVideos = emptyList()
-                        )
-                    }
-                }
+                videoRepository.observeMatchTasksByStatusesForSourceIds(sourceIds, statusesForFilter(_libraryState.value.taskFilter))
+                    .collectLatest { tasks -> _libraryState.update { it.copy(matchTasks = tasks, unqueuedVideos = emptyList()) } }
             }
         }
     }
 
     private fun observeMatchTaskCounts() {
-        val root = _libraryState.value.folderUriString ?: return
         observeTaskCountsJob?.cancel()
         observeTaskCountsJob = viewModelScope.launch {
-            videoRepository.observeMatchTaskFilterCounts(root).collectLatest { counts ->
+            videoRepository.observeMatchTaskFilterCountsForSourceIds(currentSourceIds()).collectLatest { counts ->
                 _libraryState.update { it.copy(matchTaskFilterCounts = counts) }
+            }
+        }
+    }
+
+    private fun observeDirectory() {
+        observeDirectoryFoldersJob?.cancel()
+        observeDirectoryVideosJob?.cancel()
+        val state = _libraryState.value
+        val concreteSourceId = state.currentDirectorySourceId ?: state.sourceScopes
+            .firstOrNull { it.key == state.selectedSourceScopeKey }
+            ?.sourceIds
+            ?.singleOrNull()
+        if (concreteSourceId == null) {
+            val activeIds = currentSourceIds()
+            val folders = state.librarySources
+                .filter { source -> activeIds.isEmpty() || source.id in activeIds }
+                .map { source ->
+                    LibraryFolderNode(
+                        sourceId = source.id,
+                        sourceName = source.name,
+                        path = "",
+                        parentPath = null,
+                        name = source.name
+                    )
+                }
+            _libraryState.update { it.copy(directoryFolders = folders, directoryVideos = emptyList(), currentDirectorySourceId = null, currentDirectoryPath = "") }
+            return
+        }
+        val path = state.currentDirectoryPath
+        observeDirectoryFoldersJob = viewModelScope.launch {
+            videoRepository.observeChildFolders(concreteSourceId, path).collectLatest { folders ->
+                _libraryState.update { it.copy(directoryFolders = folders) }
+            }
+        }
+        observeDirectoryVideosJob = viewModelScope.launch {
+            videoRepository.observeVideosInFolder(concreteSourceId, path).collectLatest { videos ->
+                _libraryState.update { it.copy(directoryVideos = videos) }
             }
         }
     }
@@ -1686,6 +1891,48 @@ class AppViewModel(
         return raw.takeIf { it.matches(Regex("[A-Za-z0-9_-]{8,}")) }
     }
 
+    private fun currentSourceIds(): List<String> {
+        val state = _libraryState.value
+        val sources = state.librarySources
+        val scope = state.sourceScopes.firstOrNull { it.key == state.selectedSourceScopeKey }
+        return when {
+            sources.isEmpty() -> emptyList()
+            scope == null -> emptyList()
+            scope.key == ALL_SOURCES_KEY -> emptyList()
+            else -> scope.sourceIds
+        }
+    }
+
+    private fun buildSourceScopes(sources: List<LibrarySource>): List<LibrarySourceScope> {
+        if (sources.isEmpty()) return emptyList()
+        val scopes = mutableListOf<LibrarySourceScope>()
+        scopes += LibrarySourceScope(
+            key = ALL_SOURCES_KEY,
+            label = "全部",
+            sourceIds = emptyList()
+        )
+        val localIds = sources.filter { it.type == LibrarySourceType.LocalSaf }.map { it.id }
+        if (localIds.isNotEmpty()) {
+            scopes += LibrarySourceScope(
+                key = LOCAL_SOURCES_KEY,
+                label = "本地",
+                sourceIds = localIds
+            )
+        }
+        sources.forEach { source ->
+            scopes += LibrarySourceScope(
+                key = sourceScopeKey(source.id),
+                label = source.name,
+                sourceIds = listOf(source.id),
+                folderSourceId = source.id,
+                folderPath = ""
+            )
+        }
+        return scopes
+    }
+
+    private fun sourceScopeKey(sourceId: String): String = "source:$sourceId"
+
     private fun statusesForFilter(filter: MatchTaskFilter): List<String> {
         return when (filter) {
             MatchTaskFilter.All -> emptyList()
@@ -1706,6 +1953,10 @@ class AppViewModel(
         const val PREFS_NAME = "iwara_manager_prefs"
 
         const val KEY_FOLDER_URI = "folder_uri"
+        const val KEY_SELECTED_SOURCE_SCOPE = "selected_source_scope"
+        const val KEY_REMOTE_PROXY_IDLE_TIMEOUT_SECONDS = "remote_proxy_idle_timeout_seconds"
+        const val KEY_REMOTE_PROXY_READ_TIMEOUT_SECONDS = "remote_proxy_read_timeout_seconds"
+        const val KEY_SHOW_REMOTE_PLAYBACK_DIAGNOSTICS = "show_remote_playback_diagnostics"
         const val KEY_LAYOUT_MODE = "layout_mode"
         const val KEY_GRID_COLUMNS = "grid_columns"
         const val KEY_SHOW_REMATCH_BUTTON_IN_LIST = "show_rematch_button_in_list"

@@ -8,5 +8,7 @@ data class ScannedVideo(
     val durationMs: Long?,
     val width: Int?,
     val height: Int?,
-    val coverFilePath: String?
+    val coverFilePath: String?,
+    val relativePath: String? = null,
+    val parentPath: String? = null
 )

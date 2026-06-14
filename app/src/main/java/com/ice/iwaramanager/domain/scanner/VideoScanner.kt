@@ -14,79 +14,51 @@ import kotlin.math.absoluteValue
 class VideoScanner(
     private val context: Context
 ) {
-    private val videoExtensions = setOf(
-        "mp4",
-        "mkv",
-        "webm",
-        "mov",
-        "m4v"
-    )
+    private val videoExtensions = setOf("mp4", "mkv", "webm", "mov", "m4v")
 
-    suspend fun scan(
+    suspend fun scan(treeUri: Uri, onProgress: (ScanProgress) -> Unit = {}): List<ScannedVideo> {
+        return scanLibrary(treeUri, onProgress).videos
+    }
+
+    suspend fun scanLibrary(
         treeUri: Uri,
         onProgress: (ScanProgress) -> Unit = {}
-    ): List<ScannedVideo> = withContext(Dispatchers.IO) {
-        val root = DocumentFile.fromTreeUri(context, treeUri)
-            ?: return@withContext emptyList()
+    ): ScannedLibrary = withContext(Dispatchers.IO) {
+        val root = DocumentFile.fromTreeUri(context, treeUri) ?: return@withContext ScannedLibrary(emptyList(), emptyList())
+        val videoFiles = mutableListOf<Pair<DocumentFile, String>>()
+        val folders = mutableListOf<ScannedFolder>()
 
-        val videoFiles = mutableListOf<DocumentFile>()
-
-        fun walk(dir: DocumentFile) {
-            val children = runCatching {
-                dir.listFiles()
-            }.getOrDefault(emptyArray())
-
+        fun walk(dir: DocumentFile, relativeDir: String) {
+            val children = runCatching { dir.listFiles() }.getOrDefault(emptyArray())
             for (child in children) {
+                val name = child.name ?: continue
+                val childPath = joinPath(relativeDir, name)
                 if (child.isDirectory) {
-                    walk(child)
+                    folders += ScannedFolder(
+                        path = childPath,
+                        parentPath = relativeDir.ifBlank { null },
+                        name = name
+                    )
+                    walk(child, childPath)
                     continue
                 }
-
-                val name = child.name ?: continue
-                val ext = name.substringAfterLast('.', missingDelimiterValue = "")
-                    .lowercase()
-
+                val ext = name.substringAfterLast('.', missingDelimiterValue = "").lowercase()
                 if (ext in videoExtensions) {
-                    videoFiles += child
+                    videoFiles += child to relativeDir
                 }
             }
         }
 
-        walk(root)
-
-        val sortedFiles = videoFiles.sortedWith { a, b ->
-            naturalCompare(a.name.orEmpty(), b.name.orEmpty())
-        }
-
-        val total = sortedFiles.size
-
-        onProgress(
-            ScanProgress(
-                done = 0,
-                total = total,
-                currentName = null
-            )
-        )
+        walk(root, "")
+        val sortedFiles = videoFiles.sortedWith { a, b -> naturalCompare(a.first.name.orEmpty(), b.first.name.orEmpty()) }
+        onProgress(ScanProgress(done = 0, total = sortedFiles.size, currentName = null))
 
         val result = mutableListOf<ScannedVideo>()
-
-        sortedFiles.forEachIndexed { index, file ->
+        sortedFiles.forEachIndexed { index, (file, parentPath) ->
             val name = file.name.orEmpty()
-
-            onProgress(
-                ScanProgress(
-                    done = index,
-                    total = total,
-                    currentName = name
-                )
-            )
-
+            onProgress(ScanProgress(done = index, total = sortedFiles.size, currentName = name))
             val metadata = readVideoMetadata(file.uri)
-            val coverPath = extractCoverToCache(
-                videoUri = file.uri,
-                videoName = name
-            )
-
+            val coverPath = extractCoverToCache(videoUri = file.uri, videoName = name)
             result += ScannedVideo(
                 displayName = name,
                 uriString = file.uri.toString(),
@@ -95,123 +67,60 @@ class VideoScanner(
                 durationMs = metadata.durationMs,
                 width = metadata.width,
                 height = metadata.height,
-                coverFilePath = coverPath
+                coverFilePath = coverPath,
+                relativePath = joinPath(parentPath, name),
+                parentPath = parentPath.ifBlank { null }
             )
-
-            onProgress(
-                ScanProgress(
-                    done = index + 1,
-                    total = total,
-                    currentName = name
-                )
-            )
+            onProgress(ScanProgress(done = index + 1, total = sortedFiles.size, currentName = name))
         }
 
-        result
+        ScannedLibrary(videos = result, folders = folders.distinctBy { it.path })
     }
 
-    private fun readVideoMetadata(
-        uri: Uri
-    ): VideoMetadata {
+    private fun readVideoMetadata(uri: Uri): VideoMetadata {
         val retriever = MediaMetadataRetriever()
-
         return try {
             retriever.setDataSource(context, uri)
-
-            val durationMs = retriever
-                .extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
-                ?.toLongOrNull()
-
-            val width = retriever
-                .extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
-                ?.toIntOrNull()
-
-            val height = retriever
-                .extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
-                ?.toIntOrNull()
-
             VideoMetadata(
-                durationMs = durationMs,
-                width = width,
-                height = height
+                durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull(),
+                width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull(),
+                height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull()
             )
         } catch (_: Exception) {
-            VideoMetadata(
-                durationMs = null,
-                width = null,
-                height = null
-            )
+            VideoMetadata(null, null, null)
         } finally {
-            runCatching {
-                retriever.release()
-            }
+            runCatching { retriever.release() }
         }
     }
 
-    private fun extractCoverToCache(
-        videoUri: Uri,
-        videoName: String
-    ): String? {
+    private fun extractCoverToCache(videoUri: Uri, videoName: String): String? {
         val coverDir = File(context.cacheDir, "video_covers")
-        if (!coverDir.exists()) {
-            coverDir.mkdirs()
-        }
-
-        val safeName = videoName
-            .replace(Regex("""[^\w.\-]+"""), "_")
-            .take(80)
-
+        if (!coverDir.exists()) coverDir.mkdirs()
+        val safeName = videoName.replace(Regex("""[^\w.\-]+"""), "_").take(80)
         val hash = videoUri.toString().hashCode().absoluteValue
-
-        val coverFile = File(
-            coverDir,
-            "${hash}_${safeName}.jpg"
-        )
-
-        if (coverFile.exists() && coverFile.length() > 0L) {
-            return coverFile.absolutePath
-        }
+        val coverFile = File(coverDir, "${hash}_${safeName}.jpg")
+        if (coverFile.exists() && coverFile.length() > 0L) return coverFile.absolutePath
 
         val retriever = MediaMetadataRetriever()
-
         return try {
             retriever.setDataSource(context, videoUri)
-
-            val bitmap = retriever.getFrameAtTime(
-                1_000_000L,
-                MediaMetadataRetriever.OPTION_CLOSEST_SYNC
-            ) ?: retriever.frameAtTime ?: return null
-
-            FileOutputStream(coverFile).use { out ->
-                bitmap.compress(
-                    Bitmap.CompressFormat.JPEG,
-                    82,
-                    out
-                )
-            }
-
+            val bitmap = retriever.getFrameAtTime(1_000_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                ?: retriever.frameAtTime ?: return null
+            FileOutputStream(coverFile).use { out -> bitmap.compress(Bitmap.CompressFormat.JPEG, 82, out) }
             bitmap.recycle()
-
             coverFile.absolutePath
         } catch (_: Exception) {
             null
         } finally {
-            runCatching {
-                retriever.release()
-            }
+            runCatching { retriever.release() }
         }
     }
 
-    private data class VideoMetadata(
-        val durationMs: Long?,
-        val width: Int?,
-        val height: Int?
-    )
-
-    private fun naturalCompare(
-        a: String,
-        b: String
-    ): Int {
-        return a.lowercase().compareTo(b.lowercase())
+    private fun joinPath(parent: String, name: String): String {
+        return if (parent.isBlank()) name else "$parent/$name"
     }
+
+    private data class VideoMetadata(val durationMs: Long?, val width: Int?, val height: Int?)
+
+    private fun naturalCompare(a: String, b: String): Int = a.lowercase().compareTo(b.lowercase())
 }

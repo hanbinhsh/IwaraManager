@@ -6,10 +6,13 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.ice.iwaramanager.data.local.dao.LibrarySourceDao
 import com.ice.iwaramanager.data.local.dao.MatchTaskDao
 import com.ice.iwaramanager.data.local.dao.TagDao
 import com.ice.iwaramanager.data.local.dao.VideoDao
 import com.ice.iwaramanager.data.local.entity.IwaraTagEntity
+import com.ice.iwaramanager.data.local.entity.LibraryFolderEntity
+import com.ice.iwaramanager.data.local.entity.LibrarySourceEntity
 import com.ice.iwaramanager.data.local.entity.MatchCandidateEntity
 import com.ice.iwaramanager.data.local.entity.MatchTaskEntity
 import com.ice.iwaramanager.data.local.entity.VideoEntity
@@ -21,15 +24,18 @@ import com.ice.iwaramanager.data.local.entity.VideoTagEntity
         IwaraTagEntity::class,
         VideoTagEntity::class,
         MatchTaskEntity::class,
-        MatchCandidateEntity::class
+        MatchCandidateEntity::class,
+        LibrarySourceEntity::class,
+        LibraryFolderEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun videoDao(): VideoDao
     abstract fun tagDao(): TagDao
     abstract fun matchTaskDao(): MatchTaskDao
+    abstract fun librarySourceDao(): LibrarySourceDao
 
     companion object {
         @Volatile
@@ -42,11 +48,9 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "iwara_manager.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                     .build()
-                    .also {
-                        INSTANCE = it
-                    }
+                    .also { INSTANCE = it }
             }
         }
 
@@ -101,6 +105,26 @@ abstract class AppDatabase : RoomDatabase() {
         private val MIGRATION_2_3 = object : Migration(2, 3) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE video ADD COLUMN remoteAuthorAvatarUrl TEXT")
+            }
+        }
+
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE video ADD COLUMN sourceId TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE video ADD COLUMN relativePath TEXT")
+                db.execSQL("ALTER TABLE video ADD COLUMN parentPath TEXT")
+                db.execSQL("UPDATE video SET sourceId = libraryRootUriString WHERE sourceId = ''")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_video_sourceId ON video(sourceId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_video_sourceId_parentPath ON video(sourceId, parentPath)")
+
+                db.execSQL("CREATE TABLE IF NOT EXISTS library_source (id TEXT NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL, rootUriString TEXT NOT NULL, webDavBaseUrl TEXT, webDavRootPath TEXT, webDavUsername TEXT, remoteIndexMode TEXT NOT NULL, connectTimeoutSeconds INTEGER NOT NULL, readTimeoutSeconds INTEGER NOT NULL, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(id))")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_library_source_type ON library_source(type)")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_library_source_rootUriString ON library_source(rootUriString)")
+                db.execSQL("INSERT OR IGNORE INTO library_source(id, name, type, rootUriString, webDavBaseUrl, webDavRootPath, webDavUsername, remoteIndexMode, connectTimeoutSeconds, readTimeoutSeconds, createdAt, updatedAt) SELECT libraryRootUriString, '本地目录', 'LocalSaf', libraryRootUriString, NULL, NULL, NULL, 'Full', 15, 30, MIN(createdAt), MAX(updatedAt) FROM video GROUP BY libraryRootUriString")
+
+                db.execSQL("CREATE TABLE IF NOT EXISTS library_folder (sourceId TEXT NOT NULL, sourceName TEXT NOT NULL, path TEXT NOT NULL, parentPath TEXT, name TEXT NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(sourceId, path))")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_library_folder_sourceId ON library_folder(sourceId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_library_folder_sourceId_parentPath ON library_folder(sourceId, parentPath)")
             }
         }
     }

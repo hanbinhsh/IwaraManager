@@ -21,11 +21,16 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ice.iwaramanager.data.model.MainTab
 import com.ice.iwaramanager.data.model.Routes
 import com.ice.iwaramanager.data.model.VideoItem
+import com.ice.iwaramanager.data.model.LibraryFolderNode
+import com.ice.iwaramanager.data.model.LibrarySourceType
 import com.ice.iwaramanager.data.model.VideoOpenMode
 import com.ice.iwaramanager.data.model.VideoPlayerApp
 import com.ice.iwaramanager.ui.screen.DetailScreen
 import com.ice.iwaramanager.ui.screen.LibraryScreen
 import com.ice.iwaramanager.ui.screen.PlayerScreen
+import com.ice.iwaramanager.data.remote.WebDavClient
+import com.ice.iwaramanager.domain.security.WebDavCredentialStore
+import com.ice.iwaramanager.playback.RemotePlaybackProxyService
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -125,7 +130,8 @@ fun AppRoot(
                     openVideoWithExternalPlayer(
                         context = context,
                         video = video,
-                        componentName = componentName
+                        componentName = componentName,
+                        settingsState = settingsState
                     )
                 }
             }
@@ -170,6 +176,9 @@ fun AppRoot(
                 tabReselectTick = tabReselectTick.value,
                 showRematchButtonInList = settingsState.showRematchButtonInList,
                 onSelectTab = ::openMainTab,
+                onSourceScopeChange = viewModel::selectSourceScope,
+                onOpenDirectory = viewModel::openDirectory,
+                onDirectoryUp = viewModel::navigateDirectoryUp,
                 onOpenSettings = {
                     routeBeforeSettings.value = Routes.Library
                     currentRoute.value = Routes.Settings
@@ -236,6 +245,21 @@ fun AppRoot(
                         )
                     )
                 },
+                onWebDavNameChange = viewModel::updateWebDavName,
+                onWebDavBaseUrlChange = viewModel::updateWebDavBaseUrl,
+                onWebDavRootPathChange = viewModel::updateWebDavRootPath,
+                onWebDavUsernameChange = viewModel::updateWebDavUsername,
+                onWebDavPasswordChange = viewModel::updateWebDavPassword,
+                onWebDavIndexModeChange = viewModel::setWebDavIndexMode,
+                onWebDavConnectTimeoutSecondsChange = viewModel::setWebDavConnectTimeoutSeconds,
+                onWebDavReadTimeoutSecondsChange = viewModel::setWebDavReadTimeoutSeconds,
+                onTestWebDav = viewModel::testWebDavSource,
+                onAddWebDav = viewModel::addWebDavSource,
+                onDeleteSource = viewModel::deleteLibrarySource,
+                onScanSource = viewModel::scanLibrarySource,
+                onRemoteProxyIdleTimeoutSecondsChange = viewModel::setRemoteProxyIdleTimeoutSeconds,
+                onRemoteProxyReadTimeoutSecondsChange = viewModel::setRemoteProxyReadTimeoutSeconds,
+                onShowRemotePlaybackDiagnosticsChange = viewModel::setShowRemotePlaybackDiagnostics,
                 onLayoutModeChange = viewModel::setLibraryLayoutMode,
                 onGridColumnsChange = viewModel::setGridColumns,
                 onShowRematchButtonInListChange = viewModel::setShowRematchButtonInList,
@@ -351,22 +375,46 @@ fun AppRoot(
 private fun openVideoWithExternalPlayer(
     context: Context,
     video: VideoItem,
-    componentName: String
+    componentName: String,
+    settingsState: SettingsUiState
 ) {
     val component = ComponentName.unflattenFromString(componentName)
-
     if (component == null) {
         Toast.makeText(context, "保存的播放器配置无效", Toast.LENGTH_SHORT).show()
         return
     }
 
+    val source = settingsState.librarySources.firstOrNull { it.id == video.sourceId }
+    val playbackUri = if (source?.type == LibrarySourceType.WebDav) {
+        val password = WebDavCredentialStore(context).loadPassword(source.id)
+        val headers = WebDavClient().authHeaders(source, password)
+        if (!source.webDavUsername.isNullOrBlank() && headers.isEmpty()) {
+            Toast.makeText(context, "WebDAV 密码未保存，无法交给外部播放器", Toast.LENGTH_SHORT).show()
+            return
+        }
+        runCatching {
+            RemotePlaybackProxyService.createProxyUri(
+                context = context,
+                remoteUrl = video.uriString,
+                headers = headers,
+                mimeType = videoMimeType(video),
+                readTimeoutSeconds = settingsState.remoteProxyReadTimeoutSeconds,
+                idleTimeoutSeconds = settingsState.remoteProxyIdleTimeoutSeconds
+            )
+        }.getOrElse { error ->
+            Toast.makeText(context, "启动远程播放代理失败：${error.message ?: error::class.java.simpleName}", Toast.LENGTH_SHORT).show()
+            return
+        }
+    } else {
+        Uri.parse(video.uriString)
+    }
+
     val intent = Intent(Intent.ACTION_VIEW).apply {
-        setDataAndType(
-            Uri.parse(video.uriString),
-            videoMimeType(video)
-        )
+        setDataAndType(playbackUri, videoMimeType(video))
         this.component = component
-        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        if (source?.type != LibrarySourceType.WebDav) {
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
     }
 
     try {

@@ -16,6 +16,10 @@ data class VideoItem(
     val height: Int?,
     val coverFilePath: String?,
 
+    val sourceId: String = "",
+    val relativePath: String? = null,
+    val parentPath: String? = null,
+
     val matchedIwaraId: String? = null,
     val remoteTitle: String? = null,
     val remoteDescription: String? = null,

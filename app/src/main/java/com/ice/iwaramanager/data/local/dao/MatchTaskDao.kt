@@ -16,37 +16,23 @@ data class MatchTaskStatusCount(
 
 @Dao
 interface MatchTaskDao {
-    @Query(
-        """
-        SELECT * FROM match_task
-        WHERE libraryRootUriString = :libraryRootUriString
-        ORDER BY updatedAt DESC, id DESC
-        """
-    )
+    @Query("SELECT * FROM match_task WHERE libraryRootUriString = :libraryRootUriString ORDER BY updatedAt DESC, id DESC")
     fun observeTasks(libraryRootUriString: String): Flow<List<MatchTaskEntity>>
 
-    @Query(
-        """
-        SELECT * FROM match_task
-        WHERE libraryRootUriString = :libraryRootUriString
-        AND status IN (:statuses)
-        ORDER BY updatedAt DESC, id DESC
-        """
-    )
-    fun observeTasksByStatuses(
-        libraryRootUriString: String,
-        statuses: List<String>
-    ): Flow<List<MatchTaskEntity>>
+    @Query("SELECT * FROM match_task WHERE (:sourceCount = 0 OR libraryRootUriString IN (:sourceIds)) ORDER BY updatedAt DESC, id DESC")
+    fun observeTasksForSourceIds(sourceIds: List<String>, sourceCount: Int): Flow<List<MatchTaskEntity>>
 
-    @Query(
-        """
-        SELECT status, COUNT(*) AS count
-        FROM match_task
-        WHERE libraryRootUriString = :libraryRootUriString
-        GROUP BY status
-        """
-    )
+    @Query("SELECT * FROM match_task WHERE libraryRootUriString = :libraryRootUriString AND status IN (:statuses) ORDER BY updatedAt DESC, id DESC")
+    fun observeTasksByStatuses(libraryRootUriString: String, statuses: List<String>): Flow<List<MatchTaskEntity>>
+
+    @Query("SELECT * FROM match_task WHERE (:sourceCount = 0 OR libraryRootUriString IN (:sourceIds)) AND status IN (:statuses) ORDER BY updatedAt DESC, id DESC")
+    fun observeTasksByStatusesForSourceIds(sourceIds: List<String>, sourceCount: Int, statuses: List<String>): Flow<List<MatchTaskEntity>>
+
+    @Query("SELECT status, COUNT(*) AS count FROM match_task WHERE libraryRootUriString = :libraryRootUriString GROUP BY status")
     fun observeStatusCounts(libraryRootUriString: String): Flow<List<MatchTaskStatusCount>>
+
+    @Query("SELECT status, COUNT(*) AS count FROM match_task WHERE (:sourceCount = 0 OR libraryRootUriString IN (:sourceIds)) GROUP BY status")
+    fun observeStatusCountsForSourceIds(sourceIds: List<String>, sourceCount: Int): Flow<List<MatchTaskStatusCount>>
 
     @Insert
     suspend fun insertTask(task: MatchTaskEntity): Long
@@ -54,21 +40,8 @@ interface MatchTaskDao {
     @Update
     suspend fun updateTask(task: MatchTaskEntity)
 
-    @Query(
-        """
-        UPDATE match_task
-        SET status = :failedStatus,
-            errorMessage = :errorMessage,
-            updatedAt = :updatedAt
-        WHERE status = :runningStatus
-        """
-    )
-    suspend fun markRunningTasksAsFailed(
-        runningStatus: String,
-        failedStatus: String,
-        errorMessage: String,
-        updatedAt: Long
-    )
+    @Query("UPDATE match_task SET status = :failedStatus, errorMessage = :errorMessage, updatedAt = :updatedAt WHERE status = :runningStatus")
+    suspend fun markRunningTasksAsFailed(runningStatus: String, failedStatus: String, errorMessage: String, updatedAt: Long)
 
     @Query("SELECT * FROM match_task WHERE id = :taskId LIMIT 1")
     suspend fun getTask(taskId: Long): MatchTaskEntity?
@@ -99,10 +72,7 @@ interface MatchTaskDao {
         SELECT * FROM match_task
         WHERE libraryRootUriString = :libraryRootUriString
         AND status = :status
-        AND (
-          updatedAt < :currentUpdatedAt
-          OR (updatedAt = :currentUpdatedAt AND id < :currentTaskId)
-        )
+        AND (updatedAt < :currentUpdatedAt OR (updatedAt = :currentUpdatedAt AND id < :currentTaskId))
         ORDER BY updatedAt DESC, id DESC
         LIMIT 1
         """
@@ -124,11 +94,10 @@ interface MatchTaskDao {
         LIMIT 1
         """
     )
-    suspend fun getFirstTaskByStatus(
-        libraryRootUriString: String,
-        status: String,
-        currentTaskId: Long
-    ): MatchTaskEntity?
+    suspend fun getFirstTaskByStatus(libraryRootUriString: String, status: String, currentTaskId: Long): MatchTaskEntity?
+
+    @Query("DELETE FROM match_task WHERE libraryRootUriString = :sourceId")
+    suspend fun deleteTasksBySource(sourceId: String)
 
     @Query("DELETE FROM match_task")
     suspend fun clearTasks()

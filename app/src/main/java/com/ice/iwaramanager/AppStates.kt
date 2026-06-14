@@ -7,15 +7,27 @@ import com.ice.iwaramanager.data.model.FilterTab
 import com.ice.iwaramanager.data.model.IwaraMatchMode
 import com.ice.iwaramanager.data.model.IwaraMatchNetworkDefaults
 import com.ice.iwaramanager.data.model.IwaraVideoMeta
+import com.ice.iwaramanager.data.model.LibraryFolderNode
 import com.ice.iwaramanager.data.model.LibraryLayoutMode
+import com.ice.iwaramanager.data.model.LibrarySource
+import com.ice.iwaramanager.data.model.LibrarySourceScope
 import com.ice.iwaramanager.data.model.MatchTaskFilter
+import com.ice.iwaramanager.data.model.RemotePlaybackDiagnostic
 import com.ice.iwaramanager.data.model.VideoItem
 import com.ice.iwaramanager.data.model.VideoOpenMode
+import com.ice.iwaramanager.data.model.WebDavSourceForm
 
 data class LibraryUiState(
     val folderUriString: String? = null,
     val videos: List<VideoItem> = emptyList(),
     val filteredVideos: List<VideoItem> = emptyList(),
+    val librarySources: List<LibrarySource> = emptyList(),
+    val sourceScopes: List<LibrarySourceScope> = emptyList(),
+    val selectedSourceScopeKey: String = ALL_SOURCES_KEY,
+    val currentDirectorySourceId: String? = null,
+    val currentDirectoryPath: String = "",
+    val directoryFolders: List<LibraryFolderNode> = emptyList(),
+    val directoryVideos: List<VideoItem> = emptyList(),
 
     val layoutMode: LibraryLayoutMode = LibraryLayoutMode.Grid,
     val gridColumns: Int = 2,
@@ -49,6 +61,13 @@ data class SearchUiState(
 
 data class SettingsUiState(
     val folderUriString: String? = null,
+    val librarySources: List<LibrarySource> = emptyList(),
+    val webDavForm: WebDavSourceForm = WebDavSourceForm(),
+    val remoteProxyIdleTimeoutSecondsText: String = "300",
+    val remoteProxyIdleTimeoutSeconds: Int = 300,
+    val remoteProxyReadTimeoutSecondsText: String = "60",
+    val remoteProxyReadTimeoutSeconds: Int = 60,
+    val showRemotePlaybackDiagnostics: Boolean = true,
     val layoutMode: LibraryLayoutMode = LibraryLayoutMode.Grid,
     val gridColumns: Int = 2,
     val showRematchButtonInList: Boolean = true,
@@ -85,7 +104,10 @@ data class VideoDetailUiState(
 )
 
 data class PlayerUiState(
-    val video: VideoItem? = null
+    val video: VideoItem? = null,
+    val playbackUriString: String? = null,
+    val requestHeaders: Map<String, String> = emptyMap(),
+    val diagnostic: RemotePlaybackDiagnostic? = null
 )
 
 data class MatchUiState(
@@ -107,3 +129,6 @@ data class MatchTaskDetailUiState(
     val isBinding: Boolean = false,
     val error: String? = null
 )
+
+const val ALL_SOURCES_KEY = "__all__"
+const val LOCAL_SOURCES_KEY = "__local__"

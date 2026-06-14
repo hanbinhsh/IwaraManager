@@ -1,0 +1,146 @@
+package com.ice.iwaramanager.data.remote
+
+import android.util.Base64
+import com.ice.iwaramanager.data.model.LibrarySource
+import org.w3c.dom.Element
+import java.io.ByteArrayInputStream
+import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
+import java.net.URI
+import java.net.URL
+import java.text.SimpleDateFormat
+import java.util.Locale
+import javax.xml.parsers.DocumentBuilderFactory
+
+class WebDavClient {
+    fun authHeaders(source: LibrarySource, password: String?): Map<String, String> {
+        val username = source.webDavUsername?.trim().orEmpty()
+        if (username.isBlank() || password.isNullOrBlank()) return emptyMap()
+        val token = Base64.encodeToString("$username:$password".toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+        return mapOf("Authorization" to "Basic $token")
+    }
+
+    fun validateSource(source: LibrarySource) {
+        val base = source.webDavBaseUrl?.trim().orEmpty()
+        require(base.isNotBlank()) { "WebDAV 服务器地址不能为空" }
+        val uri = URI(base)
+        require(uri.scheme.equals("https", ignoreCase = true)) { "第一版 WebDAV 仅允许 HTTPS，请检查服务器地址" }
+        require(!uri.host.isNullOrBlank()) { "WebDAV 服务器地址无效" }
+    }
+
+    fun testConnection(source: LibrarySource, password: String?): String {
+        validateSource(source)
+        val url = buildUrl(source, source.webDavRootPath.orEmpty())
+        val entries = propfind(url, source, password)
+        return "连接成功，当前目录 ${entries.size} 个条目"
+    }
+
+    fun list(source: LibrarySource, password: String?, path: String): List<WebDavEntry> {
+        validateSource(source)
+        return propfind(buildUrl(source, path), source, password)
+    }
+
+    fun buildUrl(source: LibrarySource, path: String): String {
+        val base = source.webDavBaseUrl!!.trim().trimEnd('/')
+        val root = source.webDavRootPath.orEmpty().trim('/').takeIf { it.isNotBlank() }
+        val rel = path.trim('/').takeIf { it.isNotBlank() }
+        val combined = listOfNotNull(root, rel).joinToString("/")
+        return if (combined.isBlank()) base else "$base/${combined.split('/').joinToString("/") { encodePathSegment(it) }}"
+    }
+
+    private fun propfind(url: String, source: LibrarySource, password: String?): List<WebDavEntry> {
+        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = "PROPFIND"
+            connectTimeout = source.connectTimeoutSeconds * 1000
+            readTimeout = source.readTimeoutSeconds * 1000
+            setRequestProperty("Depth", "1")
+            setRequestProperty("Accept", "application/xml,text/xml,*/*")
+            setRequestProperty("User-Agent", "IwaraManager/1.0")
+            authHeaders(source, password).forEach { (key, value) -> setRequestProperty(key, value) }
+        }
+        try {
+            val code = connection.responseCode
+            if (code == HttpURLConnection.HTTP_UNAUTHORIZED || code == HttpURLConnection.HTTP_FORBIDDEN) {
+                error("WebDAV 认证失败或无权限（HTTP $code）")
+            }
+            if (code == HttpURLConnection.HTTP_NOT_FOUND) error("WebDAV 路径不存在（HTTP 404）")
+            if (code !in 200..299) error("WebDAV PROPFIND 失败（HTTP $code）")
+            val bytes = connection.inputStream.use { it.readBytes() }
+            return parseMultistatus(bytes, url)
+        } catch (e: SocketTimeoutException) {
+            error("WebDAV 连接或读取超时：${e.message ?: "timeout"}")
+        } catch (e: javax.net.ssl.SSLException) {
+            error("WebDAV HTTPS/证书错误：${e.message ?: e::class.java.simpleName}")
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun parseMultistatus(bytes: ByteArray, requestUrl: String): List<WebDavEntry> {
+        val factory = DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }
+        val document = factory.newDocumentBuilder().parse(ByteArrayInputStream(bytes))
+        val requestPath = URI(requestUrl).path.trimEnd('/')
+        val responses = document.getElementsByTagNameNS("*", "response")
+        val result = mutableListOf<WebDavEntry>()
+        for (i in 0 until responses.length) {
+            val response = responses.item(i) as? Element ?: continue
+            val href = response.childText("href") ?: continue
+            val hrefUri = runCatching { URI(href) }.getOrNull()
+            val hrefPath = (hrefUri?.path ?: href).trimEnd('/')
+            if (hrefPath == requestPath) continue
+            val name = hrefPath.substringAfterLast('/').ifBlank { continue }
+            val collection = response.getElementsByTagNameNS("*", "collection").length > 0
+            val length = response.childText("getcontentlength")?.toLongOrNull() ?: 0L
+            val modified = response.childText("getlastmodified")?.let(::parseHttpDate) ?: 0L
+            val absolute = if (href.startsWith("http://") || href.startsWith("https://")) href else {
+                val req = URI(requestUrl)
+                URI(req.scheme, req.authority, hrefUri?.path ?: href, hrefUri?.query, null).toString()
+            }
+            result += WebDavEntry(
+                name = decodeName(name),
+                url = absolute,
+                isDirectory = collection,
+                size = length,
+                lastModified = modified
+            )
+        }
+        return result
+    }
+
+    private fun Element.childText(localName: String): String? {
+        val nodes = getElementsByTagNameNS("*", localName)
+        if (nodes.length == 0) return null
+        return nodes.item(0)?.textContent?.trim()?.takeIf { it.isNotBlank() }
+    }
+
+    private fun parseHttpDate(value: String): Long? {
+        val formats = listOf(
+            "EEE, dd MMM yyyy HH:mm:ss zzz",
+            "EEEE, dd-MMM-yy HH:mm:ss zzz",
+            "EEE MMM d HH:mm:ss yyyy"
+        )
+        for (format in formats) {
+            val parsed = runCatching {
+                SimpleDateFormat(format, Locale.US).parse(value)?.time
+            }.getOrNull()
+            if (parsed != null) return parsed
+        }
+        return null
+    }
+
+    private fun encodePathSegment(value: String): String {
+        return java.net.URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
+    }
+
+    private fun decodeName(value: String): String {
+        return runCatching { java.net.URLDecoder.decode(value, Charsets.UTF_8.name()) }.getOrDefault(value)
+    }
+}
+
+data class WebDavEntry(
+    val name: String,
+    val url: String,
+    val isDirectory: Boolean,
+    val size: Long,
+    val lastModified: Long
+)

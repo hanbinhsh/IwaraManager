@@ -27,6 +27,8 @@ import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.FilterAlt
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Refresh
@@ -34,6 +36,8 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.ViewList
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -69,6 +73,7 @@ import com.ice.iwaramanager.LibraryUiState
 import com.ice.iwaramanager.SearchUiState
 import com.ice.iwaramanager.data.local.dao.CountItem
 import com.ice.iwaramanager.data.local.entity.MatchTaskEntity
+import com.ice.iwaramanager.data.model.LibraryFolderNode
 import com.ice.iwaramanager.data.model.FilterTab
 import com.ice.iwaramanager.data.model.LibraryLayoutMode
 import com.ice.iwaramanager.data.model.MainTab
@@ -86,6 +91,9 @@ fun LibraryScreen(
     tabReselectTick: Long,
     showRematchButtonInList: Boolean,
     onSelectTab: (MainTab) -> Unit,
+    onSourceScopeChange: (String) -> Unit,
+    onOpenDirectory: (LibraryFolderNode) -> Unit,
+    onDirectoryUp: () -> Unit,
     onOpenSettings: () -> Unit,
     onRescan: () -> Unit,
     onLayoutModeChange: (LibraryLayoutMode) -> Unit,
@@ -146,24 +154,29 @@ fun LibraryScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Iwara Manager") },
+                title = {
+                    SourceScopeDropdown(
+                        state = libraryState,
+                        onSourceScopeChange = onSourceScopeChange
+                    )
+                },
                 actions = {
                     IconButton(
                         onClick = {
                             onLayoutModeChange(
-                                if (libraryState.layoutMode == LibraryLayoutMode.Grid) {
-                                    LibraryLayoutMode.List
-                                } else {
-                                    LibraryLayoutMode.Grid
+                                when (libraryState.layoutMode) {
+                                    LibraryLayoutMode.Grid -> LibraryLayoutMode.List
+                                    LibraryLayoutMode.List -> LibraryLayoutMode.Directory
+                                    LibraryLayoutMode.Directory -> LibraryLayoutMode.Grid
                                 }
                             )
                         }
                     ) {
                         Icon(
-                            imageVector = if (libraryState.layoutMode == LibraryLayoutMode.Grid) {
-                                Icons.Filled.ViewList
-                            } else {
-                                Icons.Filled.GridView
+                            imageVector = when (libraryState.layoutMode) {
+                                LibraryLayoutMode.Grid -> Icons.Filled.ViewList
+                                LibraryLayoutMode.List -> Icons.Filled.FolderOpen
+                                LibraryLayoutMode.Directory -> Icons.Filled.GridView
                             },
                             contentDescription = "切换布局"
                         )
@@ -171,7 +184,7 @@ fun LibraryScreen(
 
                     IconButton(
                         onClick = onRescan,
-                        enabled = libraryState.folderUriString != null && !libraryState.isScanning
+                        enabled = libraryState.librarySources.isNotEmpty() && !libraryState.isScanning
                     ) {
                         Icon(Icons.Filled.Refresh, contentDescription = "重新扫描")
                     }
@@ -189,7 +202,7 @@ fun LibraryScreen(
             )
         }
     ) { paddingValues ->
-        if (libraryState.folderUriString == null) {
+        if (libraryState.librarySources.isEmpty()) {
             NoFolderContent(
                 modifier = Modifier
                     .fillMaxSize()
@@ -210,6 +223,8 @@ fun LibraryScreen(
                 onOpenVideo = onOpenVideo,
                 onMatchVideo = onMatchVideo,
                 onPlayVideo = onPlayVideo,
+                onOpenDirectory = onOpenDirectory,
+                onDirectoryUp = onDirectoryUp,
                 showRematchButtonInList = showRematchButtonInList
             )
 
@@ -263,6 +278,40 @@ fun LibraryScreen(
     }
 }
 
+
+@Composable
+private fun SourceScopeDropdown(
+    state: LibraryUiState,
+    onSourceScopeChange: (String) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val current = state.sourceScopes.firstOrNull { it.key == state.selectedSourceScopeKey }
+    Box {
+        TextButton(onClick = { expanded = true }) {
+            Text(
+                text = current?.label ?: "Iwara Manager",
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Icon(Icons.Filled.ExpandMore, contentDescription = "选择来源")
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false }
+        ) {
+            state.sourceScopes.forEach { scope ->
+                DropdownMenuItem(
+                    text = { Text(scope.label) },
+                    onClick = {
+                        expanded = false
+                        onSourceScopeChange(scope.key)
+                    }
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun LibraryContent(
     modifier: Modifier,
@@ -272,6 +321,8 @@ private fun LibraryContent(
     onOpenVideo: (VideoItem) -> Unit,
     onMatchVideo: (VideoItem) -> Unit,
     onPlayVideo: (VideoItem) -> Unit,
+    onOpenDirectory: (LibraryFolderNode) -> Unit,
+    onDirectoryUp: () -> Unit,
     showRematchButtonInList: Boolean
 ) {
     Column(modifier = modifier) {
@@ -290,7 +341,18 @@ private fun LibraryContent(
         val videos = state.filteredVideos.ifEmpty { state.videos }
         ResultCountText("共 ${videos.size} 个视频")
 
-        if (!state.isScanning && videos.isEmpty()) {
+        if (state.layoutMode == LibraryLayoutMode.Directory) {
+            DirectoryContent(
+                state = state,
+                listState = listState,
+                onOpenDirectory = onOpenDirectory,
+                onDirectoryUp = onDirectoryUp,
+                onOpenVideo = onOpenVideo,
+                onMatchVideo = onMatchVideo,
+                onPlayVideo = onPlayVideo,
+                showRematchButtonInList = showRematchButtonInList
+            )
+        } else if (!state.isScanning && videos.isEmpty()) {
             EmptyHint("没有找到视频。")
         } else {
             VideoShelfContent(
@@ -305,6 +367,109 @@ private fun LibraryContent(
                 showRematchButtonInList = showRematchButtonInList
             )
         }
+    }
+}
+
+
+@Composable
+private fun DirectoryContent(
+    state: LibraryUiState,
+    listState: LazyListState,
+    onOpenDirectory: (LibraryFolderNode) -> Unit,
+    onDirectoryUp: () -> Unit,
+    onOpenVideo: (VideoItem) -> Unit,
+    onMatchVideo: (VideoItem) -> Unit,
+    onPlayVideo: (VideoItem) -> Unit,
+    showRematchButtonInList: Boolean
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        state = listState,
+        contentPadding = PaddingValues(bottom = 24.dp)
+    ) {
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(
+                    onClick = onDirectoryUp,
+                    enabled = state.currentDirectorySourceId != null && state.currentDirectoryPath.isNotBlank()
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "上一级")
+                }
+                Text(
+                    text = directoryTitle(state),
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+        items(state.directoryFolders, key = { "folder:${it.sourceId}:${it.path}" }) { folder ->
+            ListItem(
+                leadingContent = { Icon(Icons.Filled.FolderOpen, contentDescription = null) },
+                headlineContent = { Text(folder.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                supportingContent = { Text(folder.sourceName, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                modifier = Modifier.fillMaxWidth().clickable { onOpenDirectory(folder) }
+            )
+        }
+        items(state.directoryVideos, key = { it.uriString }) { video ->
+            DirectoryVideoItem(
+                video = video,
+                onOpen = { onOpenVideo(video) },
+                onMatch = { onMatchVideo(video) },
+                showRematchButton = video.matchedIwaraId == null || showRematchButtonInList
+            )
+        }
+        if (state.directoryFolders.isEmpty() && state.directoryVideos.isEmpty()) {
+            item { EmptyTaskText("当前目录没有视频。") }
+        }
+    }
+}
+
+@Composable
+private fun DirectoryVideoItem(
+    video: VideoItem,
+    onOpen: () -> Unit,
+    onMatch: () -> Unit,
+    showRematchButton: Boolean
+) {
+    ListItem(
+        leadingContent = {
+            if (video.coverFilePath != null) {
+                AsyncImage(
+                    model = File(video.coverFilePath),
+                    contentDescription = video.displayName,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.width(74.dp).height(42.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant)
+                )
+            } else {
+                Box(
+                    modifier = Modifier.width(74.dp).height(42.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant),
+                    contentAlignment = Alignment.Center
+                ) { Text("无", style = MaterialTheme.typography.labelSmall) }
+            }
+        },
+        headlineContent = { Text(video.title ?: video.displayName, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+        supportingContent = { Text(buildVideoInfoLine(video), maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        trailingContent = {
+            if (showRematchButton) {
+                TextButton(onClick = onMatch) { Text(if (video.matchedIwaraId == null) "匹配" else "重匹配") }
+            }
+        },
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onOpen)
+    )
+}
+
+private fun directoryTitle(state: LibraryUiState): String {
+    val source = state.librarySources.firstOrNull { it.id == state.currentDirectorySourceId }?.name
+    val path = state.currentDirectoryPath
+    return when {
+        source == null -> "来源根目录"
+        path.isBlank() -> source
+        else -> "$source / $path"
     }
 }
 
@@ -397,6 +562,16 @@ private fun VideoShelfContent(
     showRematchButtonInList: Boolean
 ) {
     when (layoutMode) {
+        LibraryLayoutMode.Directory -> VideoListContent(
+            videos = videos,
+            listState = listState,
+            contentPadding = PaddingValues(bottom = 24.dp),
+            onOpenVideo = onOpenVideo,
+            onMatchVideo = onMatchVideo,
+            onPlayVideo = onPlayVideo,
+            showRematchButtonInList = showRematchButtonInList
+        )
+
         LibraryLayoutMode.List -> VideoListContent(
             videos = videos,
             listState = listState,

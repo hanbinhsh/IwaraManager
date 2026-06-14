@@ -8,6 +8,8 @@ import androidx.room.PrimaryKey
     tableName = "video",
     indices = [
         Index(value = ["libraryRootUriString"]),
+        Index(value = ["sourceId"]),
+        Index(value = ["sourceId", "parentPath"]),
         Index(value = ["matchedIwaraId"]),
         Index(value = ["matchStatus"]),
         Index(value = ["remoteAuthorUsername"]),
@@ -19,6 +21,9 @@ data class VideoEntity(
     val uriString: String,
 
     val libraryRootUriString: String,
+    val sourceId: String = libraryRootUriString,
+    val relativePath: String? = null,
+    val parentPath: String? = null,
 
     val displayName: String,
     val fileSize: Long,
