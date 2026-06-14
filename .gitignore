@@ -1,0 +1,38 @@
+# Gradle / Android build output
+.gradle/
+build/
+**/build/
+.externalNativeBuild/
+.cxx/
+captures/
+
+# Local machine configuration
+local.properties
+*.iml
+
+# Android Studio / IntelliJ user state
+.idea/
+
+# Kotlin / compiler caches
+.kotlin/
+
+# Generated packages and mapping artifacts
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+*.hprof
+mapping.txt
+
+# Native build products
+*.so
+*.dylib
+*.dll
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
