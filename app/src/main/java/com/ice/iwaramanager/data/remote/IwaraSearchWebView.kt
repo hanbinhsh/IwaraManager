@@ -13,6 +13,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import com.ice.iwaramanager.data.model.IwaraMatchNetworkOptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -28,26 +29,30 @@ class IwaraSearchWebView(
 
     suspend fun fetchById(
         id: String,
-        timeoutMillis: Long
+        timeoutMillis: Long,
+        options: IwaraMatchNetworkOptions = IwaraMatchNetworkOptions()
     ): String {
         return loadAndExtract(
             query = id,
             url = "https://www.iwara.tv/video/${Uri.encode(id)}",
             timeoutMillis = timeoutMillis,
-            isSearch = false
+            isSearch = false,
+            options = options
         )
     }
 
     suspend fun searchByTitle(
         title: String,
-        timeoutMillis: Long
+        timeoutMillis: Long,
+        options: IwaraMatchNetworkOptions = IwaraMatchNetworkOptions()
     ): String {
         val encoded = Uri.encode(title)
         return loadAndExtract(
             query = title,
             url = "https://www.iwara.tv/search?query=$encoded",
             timeoutMillis = timeoutMillis,
-            isSearch = true
+            isSearch = true,
+            options = options
         )
     }
 
@@ -56,7 +61,8 @@ class IwaraSearchWebView(
         query: String,
         url: String,
         timeoutMillis: Long,
-        isSearch: Boolean
+        isSearch: Boolean,
+        options: IwaraMatchNetworkOptions
     ): String = withContext(Dispatchers.Main) {
         suspendCancellableCoroutine { continuation ->
             val webView = WebView(appContext)
@@ -66,6 +72,11 @@ class IwaraSearchWebView(
             var lastError: String? = null
             var attempts = 0
             var completed = false
+            val effectiveApiEndpointTemplates =
+                options.apiEndpointTemplates.ifEmpty { IwaraMatchNetworkOptions().apiEndpointTemplates }
+            val apiEndpointTemplatesJson = JSONArray(effectiveApiEndpointTemplates).toString()
+            val apiProbeTimeoutMillis = options.apiProbeTimeoutMillis.coerceIn(5_000L, 120_000L)
+            val allowPageFallback = options.allowPageFallback
 
             fun finish(timedOut: Boolean) {
                 if (completed) return
@@ -95,6 +106,77 @@ class IwaraSearchWebView(
                       function absoluteUrl(value) {
                         if (!value) return '';
                         try { return new URL(value, location.href).href; } catch (e) { return value || ''; }
+                      }
+                      function imageUrlFromAsset(value, preferredKind) {
+                        preferredKind = preferredKind || 'original';
+                        if (!value) return '';
+                        if (Array.isArray(value)) {
+                          for (var ai = 0; ai < value.length; ai++) {
+                            var arrayUrl = imageUrlFromAsset(value[ai], preferredKind);
+                            if (arrayUrl) return arrayUrl;
+                          }
+                          return '';
+                        }
+                        if (typeof value === 'string') {
+                          var text = cleanText(value);
+                          if (!text) return '';
+                          if (/^\/image\//i.test(text)) return 'https://i.iwara.tv' + text;
+                          if (/^image\//i.test(text)) return 'https://i.iwara.tv/' + text;
+                          if (/^https?:\/\//i.test(text)) return absoluteUrl(text);
+                          return '';
+                        }
+                        if (typeof value !== 'object') return '';
+                        var direct = firstTextValue(value, [
+                          'url', 'uri', 'href', 'src',
+                          'avatarUrl', 'avatar_url', 'imageUrl', 'image_url',
+                          'thumbnailUrl', 'thumbnail_url', 'originalUrl', 'original_url'
+                        ]);
+                        if (direct) {
+                          if (/^\/image\//i.test(direct)) return 'https://i.iwara.tv' + direct;
+                          if (/^image\//i.test(direct)) return 'https://i.iwara.tv/' + direct;
+                          if (/^https?:\/\//i.test(direct)) return absoluteUrl(direct);
+                        }
+                        if (value.file && typeof value.file === 'object') {
+                          var fileUrl = imageUrlFromAsset(value.file, preferredKind);
+                          if (fileUrl) return fileUrl;
+                        }
+                        if (Array.isArray(value.files) && value.files.length) {
+                          var filesUrl = imageUrlFromAsset(value.files[0], preferredKind);
+                          if (filesUrl) return filesUrl;
+                        }
+                        var nestedUrl = imageUrlFromAsset(value.thumbnail, preferredKind) ||
+                          imageUrlFromAsset(value.original, preferredKind) ||
+                          imageUrlFromAsset(value.image, preferredKind) ||
+                          imageUrlFromAsset(value.icon, preferredKind);
+                        if (nestedUrl) return nestedUrl;
+                        var id = firstTextValue(value, ['id', 'uuid', 'fileId', 'file_id']);
+                        var name = firstTextValue(value, ['name', 'filename', 'fileName', 'file_name']);
+                        if (id && name) {
+                          return 'https://i.iwara.tv/image/' + encodeURIComponent(preferredKind) + '/' +
+                            encodeURIComponent(String(id)) + '/' +
+                            encodeURIComponent(String(name));
+                        }
+                        return '';
+                      }
+                      function thumbnailUrlFromVideo(obj) {
+                        if (!obj || typeof obj !== 'object') return '';
+                        var direct = imageUrlFromAsset(firstObjectValue(obj, [
+                          'thumbnailUrl', 'thumbnail_url', 'preview', 'poster'
+                        ]), 'thumbnail');
+                        if (direct) return direct;
+                        var custom = imageUrlFromAsset(obj.customThumbnail, 'thumbnail');
+                        if (custom) return custom;
+                        var thumbnailIndex = firstObjectValue(obj, ['thumbnail']);
+                        var file = obj.file && typeof obj.file === 'object' ? obj.file :
+                          (Array.isArray(obj.files) && obj.files.length ? obj.files[0] : null);
+                        var fileId = file ? firstTextValue(file, ['id', 'uuid', 'fileId', 'file_id']) : '';
+                        if (fileId && (typeof thumbnailIndex === 'number' || /^\d+$/.test(String(thumbnailIndex || '')))) {
+                          return 'https://i.iwara.tv/image/thumbnail/' +
+                            encodeURIComponent(fileId) + '/thumbnail-' +
+                            encodeURIComponent(String(thumbnailIndex)) + '.jpg';
+                        }
+                        return imageUrlFromAsset(obj.image, 'thumbnail') ||
+                          imageUrlFromAsset(obj.thumbnail, 'thumbnail');
                       }
                       function metaContent(selectors) {
                         for (var i = 0; i < selectors.length; i++) {
@@ -144,15 +226,33 @@ class IwaraSearchWebView(
                           var raw = links[i].innerText || links[i].textContent || links[i].getAttribute('title') || links[i].getAttribute('aria-label') || '';
                           var image = links[i].querySelector('img[alt]');
                           if (image && image.getAttribute('alt')) raw = image.getAttribute('alt') + ' ' + raw;
+                          var imageUrl = image ? (
+                            image.currentSrc ||
+                            image.getAttribute('src') ||
+                            image.getAttribute('data-src') ||
+                            (image.getAttribute('srcset') || '').split(',')[0].trim().split(/\s+/)[0]
+                          ) : '';
                           var name = cleanAuthorName(raw, username);
                           if (!name) {
                             var parent = links[i].closest('[class*="author"], [class*="user"], [class*="profile"], [class*="owner"], [class*="creator"]');
-                            if (parent) name = cleanAuthorName(parent.innerText || parent.textContent || '', username);
+                            if (parent) {
+                              name = cleanAuthorName(parent.innerText || parent.textContent || '', username);
+                              if (!imageUrl) {
+                                var parentImage = parent.querySelector('img[src], img[data-src], img[srcset]');
+                                if (parentImage) {
+                                  imageUrl = parentImage.currentSrc ||
+                                    parentImage.getAttribute('src') ||
+                                    parentImage.getAttribute('data-src') ||
+                                    (parentImage.getAttribute('srcset') || '').split(',')[0].trim().split(/\s+/)[0];
+                                }
+                              }
+                            }
                           }
                           var candidate = {
                             authorName: name,
                             authorUsername: username,
-                            authorId: ''
+                            authorId: '',
+                            authorAvatarUrl: absoluteUrl(imageUrl)
                           };
                           if (candidate.authorName) return candidate;
                           if (!best.authorUsername) best = candidate;
@@ -161,12 +261,13 @@ class IwaraSearchWebView(
                           return {
                             authorName: '',
                             authorUsername: best.authorUsername,
-                            authorId: best.authorId
+                            authorId: best.authorId,
+                            authorAvatarUrl: best.authorAvatarUrl || ''
                           };
                         }
                         var text = root.innerText || root.textContent || '';
                         var by = text.match(/(?:by|author|creator)\s*[:：]?\s*([^\n\r|·]+)/i);
-                        return by ? { authorName: cleanText(by[1]), authorUsername: '', authorId: '' } : {};
+                        return by ? { authorName: cleanText(by[1]), authorUsername: '', authorId: '', authorAvatarUrl: '' } : {};
                       }
                       function thumbFrom(root, allowDocumentFallback) {
                         root = root || document;
@@ -323,6 +424,7 @@ class IwaraSearchWebView(
                           authorId: author.authorId || '',
                           authorName: author.authorName || '',
                           authorUsername: author.authorUsername || '',
+                          authorAvatarUrl: author.authorAvatarUrl || '',
                           thumbnailUrl: thumbFrom(root, allowDocumentFallback),
                           rating: stats.rating || '',
                           visibility: stats.visibility || '',
@@ -350,6 +452,7 @@ class IwaraSearchWebView(
                       function firstTextValue(obj, keys) {
                         var value = firstObjectValue(obj, keys);
                         if (value === undefined || value === null) return '';
+                        if (typeof value === 'object') return '';
                         return cleanText(String(value));
                       }
                       function numberFromValue(value) {
@@ -457,6 +560,13 @@ class IwaraSearchWebView(
                         var username = firstTextValue(user, ['username', 'slug']);
                         var id = firstTextValue(user, ['id', 'userId', 'user_id', 'uuid']);
                         var name = firstTextValue(user, ['displayName', 'display_name', 'nickname', 'name']);
+                        var avatar = user.avatar && typeof user.avatar === 'object' ? user.avatar : {};
+                        var avatarUrl = imageUrlFromAsset(avatar, 'avatar') ||
+                          imageUrlFromAsset(user.avatar, 'avatar') ||
+                          imageUrlFromAsset(user.icon, 'avatar') ||
+                          imageUrlFromAsset(user.image, 'avatar') ||
+                          imageUrlFromAsset(user.picture, 'avatar') ||
+                          firstTextValue(user, ['avatarUrl', 'avatar_url', 'picture', 'image', 'icon']);
                         if (!username && /^user\d+$/i.test(name)) {
                           username = name;
                           name = '';
@@ -470,7 +580,8 @@ class IwaraSearchWebView(
                         return {
                           authorId: id,
                           authorName: name,
-                          authorUsername: username
+                          authorUsername: username,
+                          authorAvatarUrl: imageUrlFromAsset(avatarUrl, 'avatar') || absoluteUrl(avatarUrl)
                         };
                       }
                       function structuredVideoFromObject(obj, expectedId) {
@@ -494,11 +605,7 @@ class IwaraSearchWebView(
                         var duration = durationValue(obj);
                         var tags = readStructuredTags(obj);
                         var author = readStructuredAuthor(obj);
-                        var thumbnail = firstTextValue(obj, ['thumbnailUrl', 'thumbnail_url', 'thumbnail', 'preview', 'image', 'poster']);
-                        if (!thumbnail && obj.file) thumbnail = firstTextValue(obj.file, ['thumbnailUrl', 'thumbnail_url', 'thumbnail', 'preview', 'image', 'poster']);
-                        if (!thumbnail && Array.isArray(obj.files) && obj.files.length) {
-                          thumbnail = firstTextValue(obj.files[0], ['thumbnailUrl', 'thumbnail_url', 'thumbnail', 'preview', 'image', 'poster']);
-                        }
+                        var thumbnail = thumbnailUrlFromVideo(obj);
                         var videoUrl = url.indexOf('/video/') >= 0;
                         var hasVideoShape = videoUrl || duration != null || thumbnail ||
                           author.authorName || author.authorUsername ||
@@ -519,7 +626,8 @@ class IwaraSearchWebView(
                           authorId: author.authorId || '',
                           authorName: author.authorName || '',
                           authorUsername: author.authorUsername || '',
-                          thumbnailUrl: absoluteUrl(thumbnail),
+                          authorAvatarUrl: author.authorAvatarUrl || '',
+                          thumbnailUrl: thumbnail,
                           rating: firstTextValue(obj, ['rating', 'contentRating', 'content_rating']),
                           visibility: obj.private === true ? 'private' :
                             (obj.unlisted === true ? 'unlisted' :
@@ -532,16 +640,6 @@ class IwaraSearchWebView(
                           commentCount: countValue(obj, ['commentCount', 'comment_count', 'comments', 'numComments']),
                           tags: tags
                         };
-                      }
-                      function apiVideoUrls(id) {
-                        if (!id) return [];
-                        var encoded = encodeURIComponent(id);
-                        return [
-                          'https://api.iwara.tv/video/' + encoded,
-                          'https://api.iwara.tv/videos/' + encoded,
-                          'https://api.iwara.tv/video/' + encoded + '?rating=all',
-                          'https://api.iwara.tv/videos/' + encoded + '?rating=all'
-                        ];
                       }
                       function collectStructuredResults() {
                         var expectedId = currentVideoId();
@@ -575,6 +673,7 @@ class IwaraSearchWebView(
                           }
                         }
                         var roots = [];
+                        try { if (window.__iwaraManagerApiResults) roots.push(window.__iwaraManagerApiResults); } catch (e) {}
                         try { if (window.__NUXT__) roots.push(window.__NUXT__); } catch (e) {}
                         try { if (window.__NUXT_DATA__) roots.push(window.__NUXT_DATA__); } catch (e) {}
                         try { if (window.__NEXT_DATA__) roots.push(window.__NEXT_DATA__); } catch (e) {}
@@ -582,7 +681,6 @@ class IwaraSearchWebView(
                         try { if (window.__APOLLO_STATE__) roots.push(window.__APOLLO_STATE__); } catch (e) {}
                         try { if (window.__PINIA__) roots.push(window.__PINIA__); } catch (e) {}
                         try { if (window.__pinia) roots.push(window.__pinia); } catch (e) {}
-                        try { if (window.__iwaraManagerApiResults) roots.push(window.__iwaraManagerApiResults); } catch (e) {}
                         try {
                           if (window.${'$'}nuxt) {
                             if (window.${'$'}nuxt.payload) roots.push(window.${'$'}nuxt.payload);
@@ -671,6 +769,7 @@ class IwaraSearchWebView(
                             authorId: meta.authorId || '',
                             authorName: meta.authorName || '',
                             authorUsername: meta.authorUsername || '',
+                            authorAvatarUrl: meta.authorAvatarUrl || '',
                             thumbnailUrl: meta.thumbnailUrl || '',
                             rating: meta.rating || '',
                             visibility: meta.visibility || '',
@@ -694,6 +793,10 @@ class IwaraSearchWebView(
                         pageMeta: metaFrom(document, true),
                         results: collectResults(),
                         structuredResults: collectStructuredResults(),
+                        apiProbeStarted: window.__iwaraManagerApiStarted === true,
+                        apiProbeStartedAt: window.__iwaraManagerApiStartedAt || 0,
+                        apiProbePendingMillis: window.__iwaraManagerApiStartedAt ? Date.now() - window.__iwaraManagerApiStartedAt : 0,
+                        apiProbeTimeoutMillis: window.__iwaraManagerApiTimeoutMillis || 0,
                         apiProbeDone: window.__iwaraManagerApiDone === true,
                         apiProbeErrors: window.__iwaraManagerApiErrors || [],
                         apiProbeSummaries: window.__iwaraManagerApiSummaries || []
@@ -744,6 +847,7 @@ class IwaraSearchWebView(
                         pageResults.isEmpty() &&
                         currentStructuredResult == null &&
                         currentPageId != null &&
+                        allowPageFallback &&
                         !timedOut &&
                         !emptyDocument &&
                         !loading &&
@@ -757,7 +861,7 @@ class IwaraSearchWebView(
                     }
                     val hasStructuredVideo = pageResults.isNotEmpty() || currentStructuredResult != null
                     val resultObjects = if (
-                        pageError ||
+                        (pageError && !hasStructuredVideo) ||
                         cloudflare ||
                         noResults ||
                         (loading && !hasStructuredVideo) ||
@@ -785,6 +889,7 @@ class IwaraSearchWebView(
                                 .put("authorId", pageMeta.optString("authorId"))
                                 .put("authorName", pageMeta.optString("authorName"))
                                 .put("authorUsername", pageMeta.optString("authorUsername"))
+                                .put("authorAvatarUrl", pageMeta.optString("authorAvatarUrl"))
                                 .put("thumbnailUrl", pageMeta.optString("thumbnailUrl"))
                                 .put("rating", pageMeta.optString("rating"))
                                 .put("visibility", pageMeta.optString("visibility"))
@@ -800,13 +905,13 @@ class IwaraSearchWebView(
                     val ids = resultObjects.mapNotNull { it.optString("id").takeIf { id -> id.isNotBlank() } }
 
                     val failureReason = when {
+                        ids.isNotEmpty() -> null
                         pageError -> "Iwara 返回错误页面"
                         timedOut -> "Iwara 页面超时（${timeoutMillis / 1000} 秒）"
                         loading && ids.isEmpty() -> "Iwara 页面仍停留在 Loading，未提取到有效视频"
                         cloudflare -> "Iwara Cloudflare 校验未通过"
                         noResults -> "Iwara 搜索无结果"
                         lastError != null -> lastError
-                        ids.isNotEmpty() -> null
                         else -> "页面已加载，但未提取到候选 ID"
                     }
 
@@ -822,12 +927,18 @@ class IwaraSearchWebView(
                         .put("pageFinished", pageFinished)
                         .put("timedOut", timedOut)
                         .put("timeoutMillis", timeoutMillis)
+                        .put("apiEndpointTemplates", JSONArray(effectiveApiEndpointTemplates))
+                        .put("allowPageFallback", allowPageFallback)
                         .put("lastError", lastError)
                         .put("cloudflare", cloudflare)
                         .put("noResults", noResults)
                         .put("pageError", pageError)
                         .put("loading", loading)
                         .put("structuredResultCount", structuredResults.size)
+                        .put("apiProbeStarted", payload.optBoolean("apiProbeStarted"))
+                        .put("apiProbeStartedAt", payload.optLong("apiProbeStartedAt"))
+                        .put("apiProbePendingMillis", payload.optLong("apiProbePendingMillis"))
+                        .put("apiProbeTimeoutMillis", payload.optLong("apiProbeTimeoutMillis"))
                         .put("apiProbeDone", payload.optBoolean("apiProbeDone"))
                         .put("apiProbeErrors", payload.optJSONArray("apiProbeErrors") ?: JSONArray())
                         .put("apiProbeSummaries", payload.optJSONArray("apiProbeSummaries") ?: JSONArray())
@@ -847,6 +958,11 @@ class IwaraSearchWebView(
                                 if (pageError) append("；错误页:true")
                                 if (loading) append("；Loading:true")
                                 append("；结构化结果:${structuredResults.size}")
+                                if (payload.optBoolean("apiProbeStarted")) {
+                                    val apiProbeState = if (payload.optBoolean("apiProbeDone")) "完成" else "等待中"
+                                    append("；API探测:$apiProbeState")
+                                    append("；API等待:${payload.optLong("apiProbePendingMillis")}ms")
+                                }
                             }
                         )
 
@@ -882,101 +998,115 @@ class IwaraSearchWebView(
                           function startApiProbe() {
                             var id = currentVideoId();
                             if (searchPage || !id || window.__iwaraManagerApiStarted) return;
+                            var endpointTemplates = $apiEndpointTemplatesJson;
+                            if (!Array.isArray(endpointTemplates) || endpointTemplates.length === 0) return;
                             window.__iwaraManagerApiStarted = true;
                             window.__iwaraManagerApiDone = false;
+                            window.__iwaraManagerApiStartedAt = Date.now();
+                            window.__iwaraManagerApiTimeoutMillis = $apiProbeTimeoutMillis;
                             window.__iwaraManagerApiResults = [];
                             window.__iwaraManagerApiErrors = [];
                             window.__iwaraManagerApiSummaries = [];
                             var encoded = encodeURIComponent(id);
-                            var urls = [
-                              'https://api.iwara.tv/video/' + encoded,
-                              'https://api.iwara.tv/videos/' + encoded,
-                              'https://api.iwara.tv/video/' + encoded + '?rating=all',
-                              'https://api.iwara.tv/videos/' + encoded + '?rating=all'
-                            ];
-                            Promise.allSettled(urls.map(function(apiUrl) {
-                              return fetch(apiUrl, {
+                            var urls = endpointTemplates.map(function(template) {
+                              return String(template)
+                                .replace(/\{id\}/g, encoded)
+                                .replace(/\{rawId\}/g, id);
+                            }).filter(function(value, index, array) {
+                              return value && array.indexOf(value) === index;
+                            });
+                            if (!urls.length) return;
+                            function summarize(apiUrl, parsed) {
+                              var root = parsed && typeof parsed === 'object' ? parsed : {};
+                              var data = root.data && typeof root.data === 'object' ? root.data : root;
+                              var file = data.file && typeof data.file === 'object' ? data.file :
+                                (Array.isArray(data.files) && data.files.length ? data.files[0] : {});
+                              var user = data.user && typeof data.user === 'object' ? data.user : {};
+                              return {
+                                url: apiUrl,
+                                rootKeys: Object.keys(root).slice(0, 80),
+                                dataKeys: Object.keys(data).slice(0, 80),
+                                fileKeys: Object.keys(file || {}).slice(0, 80),
+                                userKeys: Object.keys(user || {}).slice(0, 80),
+                                dataPreview: JSON.stringify(data).slice(0, 3000)
+                              };
+                            }
+                            function markDone() {
+                              if (window.__iwaraManagerApiDone === true) return;
+                              window.__iwaraManagerApiDone = true;
+                            }
+                            var remaining = urls.length;
+                            var globalTimer = setTimeout(function() {
+                              if (window.__iwaraManagerApiDone === true) return;
+                              window.__iwaraManagerApiErrors.push('API probe timeout after ' + window.__iwaraManagerApiTimeoutMillis + 'ms');
+                              markDone();
+                            }, window.__iwaraManagerApiTimeoutMillis);
+                            function completeOne() {
+                              remaining -= 1;
+                              if (remaining <= 0) {
+                                clearTimeout(globalTimer);
+                                markDone();
+                              }
+                            }
+                            urls.forEach(function(apiUrl) {
+                              var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+                              var requestTimer = controller ? setTimeout(function() {
+                                try { controller.abort(); } catch (e) {}
+                              }, window.__iwaraManagerApiTimeoutMillis - 1000) : null;
+                              fetch(apiUrl, {
                                 credentials: 'include',
-                                headers: { 'accept': 'application/json' }
+                                headers: { 'accept': 'application/json' },
+                                signal: controller ? controller.signal : undefined
                               }).then(function(response) {
                                 return response.text().then(function(body) {
-                                  return {
-                                    url: apiUrl,
-                                    ok: response.ok,
-                                    status: response.status,
-                                    body: body
-                                  };
-                                });
-                              });
-                            })).then(function(items) {
-                              var results = [];
-                              var errors = [];
-                              var summaries = [];
-                              function summarize(apiUrl, parsed) {
-                                var root = parsed && typeof parsed === 'object' ? parsed : {};
-                                var data = root.data && typeof root.data === 'object' ? root.data : root;
-                                var file = data.file && typeof data.file === 'object' ? data.file :
-                                  (Array.isArray(data.files) && data.files.length ? data.files[0] : {});
-                                var user = data.user && typeof data.user === 'object' ? data.user : {};
-                                return {
-                                  url: apiUrl,
-                                  rootKeys: Object.keys(root).slice(0, 80),
-                                  dataKeys: Object.keys(data).slice(0, 80),
-                                  fileKeys: Object.keys(file || {}).slice(0, 80),
-                                  userKeys: Object.keys(user || {}).slice(0, 80),
-                                  dataPreview: JSON.stringify(data).slice(0, 3000)
-                                };
-                              }
-                              for (var i = 0; i < items.length; i++) {
-                                if (items[i].status !== 'fulfilled') {
-                                  errors.push(String(items[i].reason || 'fetch failed'));
-                                  continue;
-                                }
-                                var value = items[i].value;
-                                if (!value.ok) {
-                                  errors.push(value.url + ' HTTP ' + value.status);
-                                  continue;
-                                }
-                                try {
-                                  var parsed = JSON.parse(value.body);
-                                  if (parsed && typeof parsed === 'object') {
-                                    results.push(parsed);
-                                    summaries.push(summarize(value.url, parsed));
+                                  if (!response.ok) {
+                                    window.__iwaraManagerApiErrors.push(apiUrl + ' HTTP ' + response.status);
+                                    return;
                                   }
-                                } catch (e) {
-                                  errors.push(value.url + ' JSON parse failed');
-                                }
-                              }
-                              window.__iwaraManagerApiResults = results;
-                              window.__iwaraManagerApiErrors = errors;
-                              window.__iwaraManagerApiSummaries = summaries;
-                              window.__iwaraManagerApiDone = true;
-                            }).catch(function(error) {
-                              window.__iwaraManagerApiErrors = [String(error && error.message || error || 'fetch failed')];
-                              window.__iwaraManagerApiSummaries = [];
-                              window.__iwaraManagerApiDone = true;
+                                  try {
+                                    var parsed = JSON.parse(body);
+                                    if (parsed && typeof parsed === 'object') {
+                                      window.__iwaraManagerApiResults.push(parsed);
+                                      window.__iwaraManagerApiSummaries.push(summarize(apiUrl, parsed));
+                                    }
+                                  } catch (e) {
+                                    window.__iwaraManagerApiErrors.push(apiUrl + ' JSON parse failed');
+                                  }
+                                });
+                              }).catch(function(error) {
+                                window.__iwaraManagerApiErrors.push(apiUrl + ' ' + String(error && error.message || error || 'fetch failed'));
+                              }).finally(function() {
+                                if (requestTimer) clearTimeout(requestTimer);
+                                completeOne();
+                              });
                             });
                           }
                           startApiProbe();
                           var linkFound = /\/video\/([A-Za-z0-9_-]{8,})/.test(html);
-                          var pathFound = /\/video\/[A-Za-z0-9_-]{8,}/.test(location.pathname) &&
-                              !loading && !pageError && !cloudflare && (text.length > 80 || html.length > 3000);
+                          var pathHasId = /\/video\/[A-Za-z0-9_-]{8,}/.test(location.pathname);
+                          var pathFound = pathHasId && !cloudflare && (text.length > 80 || html.length > 3000);
                           var titleReady = !/^(search|loading|iwara|error|404|not found)$/i.test((title || '').replace(/\s*\|\s*Iwara\s*$/i, '').trim()) ||
                               !!document.querySelector('h1, h2, [data-testid*="title"], meta[property="og:title"]');
                           var apiDone = window.__iwaraManagerApiDone === true;
+                          var apiStarted = window.__iwaraManagerApiStarted === true;
                           var apiHasVideo = Array.isArray(window.__iwaraManagerApiResults) && window.__iwaraManagerApiResults.length > 0;
                           var metadataReady = /"(durationSeconds|duration_seconds|duration|rating|visibility|createdAt|created_at|publishedAt|published_at|tags|likeCount|viewCount|commentCount)"\s*:/i.test(html) ||
                               /\b(tags?|views?|likes?|comments?|r-?18|ecchi|general|public|private|unlisted)\b/i.test(text);
                           var searchReady = linkFound && !loading && !pageError && !cloudflare;
                           var enoughDomWait = ${attempts} >= 4;
-                          var detailReady = pathFound && titleReady && (apiHasVideo || (apiDone && metadataReady) || (enoughDomWait && metadataReady));
-                          var found = !loading && !pageError && !cloudflare && (searchPage ? searchReady : detailReady);
+                          var allowPageFallback = ${if (allowPageFallback) "true" else "false"};
+                          var domFallbackReady = allowPageFallback && !loading && !pageError && titleReady && metadataReady &&
+                              (apiDone || !apiStarted) && enoughDomWait;
+                          var apiFallbackReady = allowPageFallback && !loading && !pageError && titleReady && apiDone && metadataReady;
+                          var detailReady = pathFound && (apiHasVideo || apiFallbackReady || domFallbackReady);
+                          var found = searchPage ? searchReady : detailReady;
                           return JSON.stringify({
                             found: found,
                             noResults: noResults,
                             cloudflare: cloudflare,
                             pageError: pageError,
                             loading: loading,
+                            apiStarted: apiStarted,
                             apiDone: apiDone,
                             apiHasVideo: apiHasVideo
                           });
@@ -984,11 +1114,13 @@ class IwaraSearchWebView(
                         """.trimIndent()
                     ) { value ->
                         val obj = parseEvaluateObject(value)
+                        val terminalPageError = obj.optBoolean("pageError") &&
+                            (isSearch || obj.optBoolean("apiDone") || !obj.optBoolean("apiStarted"))
                         if (
                             obj.optBoolean("found") ||
                             obj.optBoolean("noResults") ||
                             obj.optBoolean("cloudflare") ||
-                            obj.optBoolean("pageError")
+                            terminalPageError
                         ) {
                             finish(timedOut = false)
                         } else {
@@ -1072,6 +1204,7 @@ class IwaraSearchWebView(
                 .put("authorId", obj.optString("authorId").trim())
                 .put("authorName", obj.optString("authorName").trim())
                 .put("authorUsername", obj.optString("authorUsername").trim())
+                .put("authorAvatarUrl", obj.optString("authorAvatarUrl").trim())
                 .put("thumbnailUrl", obj.optString("thumbnailUrl").trim())
                 .put("rating", obj.optString("rating").trim())
                 .put("visibility", obj.optString("visibility").trim())
@@ -1117,6 +1250,7 @@ class IwaraSearchWebView(
             "authorId",
             "authorName",
             "authorUsername",
+            "authorAvatarUrl",
             "rating",
             "visibility",
             "createdAt",

@@ -26,6 +26,9 @@ import com.ice.iwaramanager.data.model.VideoPlayerApp
 import com.ice.iwaramanager.ui.screen.DetailScreen
 import com.ice.iwaramanager.ui.screen.LibraryScreen
 import com.ice.iwaramanager.ui.screen.PlayerScreen
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @Composable
 fun AppRoot(
@@ -74,6 +77,22 @@ fun AppRoot(
             viewModel.onFolderPicked(uri)
             selectedTab.value = MainTab.Library
             currentRoute.value = Routes.Library
+        }
+    }
+
+    val databaseExporter = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/octet-stream")
+    ) { uri ->
+        if (uri != null) {
+            viewModel.exportDatabase(uri)
+        }
+    }
+
+    val databaseImporter = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            viewModel.importDatabase(uri)
         }
     }
 
@@ -149,6 +168,7 @@ fun AppRoot(
                 searchState = searchState,
                 selectedTab = selectedTab.value,
                 tabReselectTick = tabReselectTick.value,
+                showRematchButtonInList = settingsState.showRematchButtonInList,
                 onSelectTab = ::openMainTab,
                 onOpenSettings = {
                     routeBeforeSettings.value = Routes.Library
@@ -174,6 +194,7 @@ fun AppRoot(
                 onRetryMatchTask = viewModel::retryMatchTask,
                 onRetryFailedTasks = viewModel::retryFailedMatchTasks,
                 onStartBatchMatch = viewModel::startBatchMatchUnmatched,
+                onStartBatchRematch = viewModel::startBatchRematchMatched,
                 onOpenVideo = { video ->
                     viewModel.openVideoDetail(video)
                     tabBeforeDetail.value = selectedTab.value
@@ -202,14 +223,38 @@ fun AppRoot(
                 onRescan = viewModel::rescanLibrary,
                 onClearDatabase = viewModel::clearDatabase,
                 onClearFolder = viewModel::clearLibraryFolder,
+                onExportDatabase = {
+                    databaseExporter.launch(defaultDatabaseFileName())
+                },
+                onImportDatabase = {
+                    databaseImporter.launch(
+                        arrayOf(
+                            "application/octet-stream",
+                            "application/vnd.sqlite3",
+                            "application/x-sqlite3",
+                            "*/*"
+                        )
+                    )
+                },
                 onLayoutModeChange = viewModel::setLibraryLayoutMode,
                 onGridColumnsChange = viewModel::setGridColumns,
+                onShowRematchButtonInListChange = viewModel::setShowRematchButtonInList,
                 onVideoOpenModeChange = viewModel::setVideoOpenMode,
                 onExternalVideoPlayerChange = viewModel::setExternalVideoPlayer,
                 onResetVideoOpenMode = viewModel::resetVideoOpenMode,
                 onIwaraMatchModeChange = viewModel::setIwaraMatchMode,
                 onMatchSearchTimeoutSecondsChange = viewModel::setMatchSearchTimeoutSeconds,
-                onBatchMatchThreadsChange = viewModel::setBatchMatchThreads
+                onApiProbeTimeoutSecondsChange = viewModel::setApiProbeTimeoutSeconds,
+                onApiEndpointTemplatesChange = viewModel::setApiEndpointTemplates,
+                onResetApiEndpointTemplates = viewModel::resetApiEndpointTemplates,
+                onAllowPageFallbackChange = viewModel::setAllowPageFallback,
+                onFetchSearchResultDetailsWithApiChange = viewModel::setFetchSearchResultDetailsWithApi,
+                onMaxSearchApiDetailsChange = viewModel::setMaxSearchApiDetails,
+                onBatchMatchThreadsChange = viewModel::setBatchMatchThreads,
+                onAutoMatchSingleHighConfidenceChange = viewModel::setAutoMatchSingleHighConfidence,
+                onAutoMatchTitleSimilarityThresholdChange = viewModel::setAutoMatchTitleSimilarityThreshold,
+                onAutoMatchDurationToleranceSecondsChange = viewModel::setAutoMatchDurationToleranceSeconds,
+                onAutoMatchSkipNoIdChange = viewModel::setAutoMatchSkipNoId
             )
         }
 
@@ -377,4 +422,9 @@ private fun videoMimeType(video: VideoItem): String {
         "wmv" -> "video/x-ms-wmv"
         else -> "video/*"
     }
+}
+
+private fun defaultDatabaseFileName(): String {
+    val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+    return "iwara_manager_$stamp.db"
 }

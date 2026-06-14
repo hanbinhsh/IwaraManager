@@ -15,6 +15,7 @@ data class IwaraVideoMeta(
     val authorId: String? = null,
     val authorName: String? = null,
     val authorUsername: String? = null,
+    val authorAvatarUrl: String? = null,
     val thumbnailUrl: String? = null,
     val rating: String? = null,
     val visibility: String? = null,
@@ -34,6 +35,20 @@ data class IwaraSearchMetaResult(
     val diagnosticRaw: String,
     val failureReason: String?
 )
+
+data class IwaraMatchNetworkOptions(
+    val apiEndpointTemplates: List<String> = IwaraMatchNetworkDefaults.apiEndpointTemplates,
+    val apiProbeTimeoutMillis: Long = 30_000L,
+    val allowPageFallback: Boolean = false,
+    val fetchSearchResultDetailsWithApi: Boolean = true,
+    val maxSearchApiDetails: Int = 10
+)
+
+object IwaraMatchNetworkDefaults {
+    val apiEndpointTemplates: List<String> = listOf(
+        "https://api.iwara.tv/video/{id}"
+    )
+}
 
 data class IwaraMatchCandidate(
     val id: String,

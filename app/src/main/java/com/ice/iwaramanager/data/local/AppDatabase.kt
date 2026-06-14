@@ -23,7 +23,7 @@ import com.ice.iwaramanager.data.local.entity.VideoTagEntity
         MatchTaskEntity::class,
         MatchCandidateEntity::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -42,11 +42,18 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "iwara_manager.db"
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .build()
                     .also {
                         INSTANCE = it
                     }
+            }
+        }
+
+        fun closeCurrent() {
+            synchronized(this) {
+                INSTANCE?.close()
+                INSTANCE = null
             }
         }
 
@@ -88,6 +95,12 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("CREATE TABLE IF NOT EXISTS match_candidate (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, taskId INTEGER NOT NULL, iwaraId TEXT NOT NULL, title TEXT NOT NULL, authorName TEXT, authorUsername TEXT, thumbnailUrl TEXT, rating TEXT, createdAtText TEXT, durationSeconds INTEGER, viewCount INTEGER, likeCount INTEGER, selected INTEGER NOT NULL, rawJson TEXT)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_match_candidate_taskId ON match_candidate(taskId)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_match_candidate_iwaraId ON match_candidate(iwaraId)")
+            }
+        }
+
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE video ADD COLUMN remoteAuthorAvatarUrl TEXT")
             }
         }
     }

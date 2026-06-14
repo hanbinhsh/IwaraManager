@@ -43,7 +43,8 @@ fun VideoListContent(
     contentPadding: PaddingValues,
     onOpenVideo: (VideoItem) -> Unit,
     onMatchVideo: (VideoItem) -> Unit,
-    onPlayVideo: (VideoItem) -> Unit
+    onPlayVideo: (VideoItem) -> Unit,
+    showRematchButtonInList: Boolean = true
 ) {
     LazyColumn(
         state = listState,
@@ -63,7 +64,8 @@ fun VideoListContent(
                 },
                 onMatch = {
                     onMatchVideo(video)
-                }
+                },
+                showRematchButton = video.matchedIwaraId == null || showRematchButtonInList
             )
         }
     }
@@ -105,7 +107,8 @@ private fun VideoListItem(
     video: VideoItem,
     onClick: () -> Unit,
     onPlay: () -> Unit,
-    onMatch: () -> Unit
+    onMatch: () -> Unit,
+    showRematchButton: Boolean
 ) {
     ListItem(
         leadingContent = {
@@ -131,10 +134,12 @@ private fun VideoListItem(
             )
         },
         trailingContent = {
-            TextButton(
-                onClick = onMatch
-            ) {
-                Text(if (video.matchedIwaraId == null) "匹配" else "重匹配")
+            if (showRematchButton) {
+                TextButton(
+                    onClick = onMatch
+                ) {
+                    Text(if (video.matchedIwaraId == null) "匹配" else "重匹配")
+                }
             }
         },
         modifier = Modifier

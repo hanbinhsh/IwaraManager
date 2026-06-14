@@ -136,6 +136,30 @@ interface VideoDao {
 
     @Query(
         """
+        SELECT * FROM video
+        WHERE libraryRootUriString = :libraryRootUriString
+        AND matchedIwaraId IS NOT NULL
+        AND matchedIwaraId != ''
+        ORDER BY updatedAt DESC
+        """
+    )
+    suspend fun getMatchedVideos(libraryRootUriString: String): List<VideoEntity>
+
+    @Query(
+        """
+        SELECT * FROM video
+        WHERE libraryRootUriString = :libraryRootUriString
+        AND (
+            (matchedIwaraId IS NOT NULL AND matchedIwaraId != '')
+            OR (sourceVideoId IS NOT NULL AND sourceVideoId != '')
+        )
+        ORDER BY updatedAt DESC
+        """
+    )
+    suspend fun getRematchableVideos(libraryRootUriString: String): List<VideoEntity>
+
+    @Query(
+        """
         UPDATE video SET
             matchedIwaraId = :matchedIwaraId,
             remoteTitle = :remoteTitle,
@@ -143,6 +167,7 @@ interface VideoDao {
             remoteAuthorId = :remoteAuthorId,
             remoteAuthorName = :remoteAuthorName,
             remoteAuthorUsername = :remoteAuthorUsername,
+            remoteAuthorAvatarUrl = :remoteAuthorAvatarUrl,
             remoteThumbnailUrl = :remoteThumbnailUrl,
             remoteRating = :remoteRating,
             remoteVisibility = :remoteVisibility,
@@ -166,6 +191,7 @@ interface VideoDao {
         remoteAuthorId: String?,
         remoteAuthorName: String?,
         remoteAuthorUsername: String?,
+        remoteAuthorAvatarUrl: String?,
         remoteThumbnailUrl: String?,
         remoteRating: String?,
         remoteVisibility: String?,

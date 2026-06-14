@@ -10,6 +10,8 @@ import com.ice.iwaramanager.data.model.LibraryLayoutMode
 import com.ice.iwaramanager.data.local.entity.MatchTaskEntity
 import com.ice.iwaramanager.data.model.FilterTab
 import com.ice.iwaramanager.data.model.IwaraMatchMode
+import com.ice.iwaramanager.data.model.IwaraMatchNetworkDefaults
+import com.ice.iwaramanager.data.model.IwaraMatchNetworkOptions
 import com.ice.iwaramanager.data.model.IwaraVideoMeta
 import com.ice.iwaramanager.data.model.MatchTaskFilter
 import com.ice.iwaramanager.data.model.MatchTaskStatus
@@ -55,6 +57,11 @@ class AppViewModel(
     private val initialGridColumns = prefs.getInt(KEY_GRID_COLUMNS, 2)
         .coerceIn(2, 6)
 
+    private val initialShowRematchButtonInList = prefs.getBoolean(
+        KEY_SHOW_REMATCH_BUTTON_IN_LIST,
+        true
+    )
+
     private val initialVideoOpenMode = runCatching {
         VideoOpenMode.valueOf(
             prefs.getString(KEY_VIDEO_OPEN_MODE, VideoOpenMode.InApp.name)
@@ -84,10 +91,58 @@ class AppViewModel(
         60
     ).coerceIn(10, 180)
 
+    private val initialApiProbeTimeoutSeconds = prefs.getInt(
+        KEY_API_PROBE_TIMEOUT_SECONDS,
+        30
+    ).coerceIn(5, 120)
+
+    private val initialApiEndpointTemplatesText = prefs.getString(
+        KEY_API_ENDPOINT_TEMPLATES,
+        IwaraMatchNetworkDefaults.apiEndpointTemplates.joinToString("\n")
+    ) ?: IwaraMatchNetworkDefaults.apiEndpointTemplates.joinToString("\n")
+
+    private val initialApiEndpointTemplates = parseApiEndpointTemplates(initialApiEndpointTemplatesText)
+        .ifEmpty { IwaraMatchNetworkDefaults.apiEndpointTemplates }
+
+    private val initialAllowPageFallback = prefs.getBoolean(
+        KEY_ALLOW_PAGE_FALLBACK,
+        false
+    )
+
+    private val initialFetchSearchResultDetailsWithApi = prefs.getBoolean(
+        KEY_FETCH_SEARCH_RESULT_DETAILS_WITH_API,
+        true
+    )
+
+    private val initialMaxSearchApiDetails = prefs.getInt(
+        KEY_MAX_SEARCH_API_DETAILS,
+        10
+    ).coerceIn(1, 30)
+
     private val initialBatchMatchThreads = prefs.getInt(
         KEY_BATCH_MATCH_THREADS,
         1
     ).coerceIn(1, 4)
+
+    private val initialAutoMatchSingleHighConfidence = prefs.getBoolean(
+        KEY_AUTO_MATCH_SINGLE_HIGH_CONFIDENCE,
+        true
+    )
+
+    private val initialAutoMatchTitleSimilarityThreshold = prefs.getInt(
+        KEY_AUTO_MATCH_TITLE_SIMILARITY_THRESHOLD,
+        90
+    ).coerceIn(1, 100)
+
+    private val initialAutoMatchDurationToleranceSeconds = prefs.getInt(
+        KEY_AUTO_MATCH_DURATION_TOLERANCE_SECONDS,
+        2
+    ).coerceIn(0, 60)
+
+    private val initialAutoMatchSkipNoId = prefs.getBoolean(
+        KEY_AUTO_MATCH_SKIP_NO_ID,
+        false
+    )
 
     private val _libraryState = MutableStateFlow(
         LibraryUiState(
@@ -110,6 +165,7 @@ class AppViewModel(
             folderUriString = initialFolderUriString,
             layoutMode = initialLayoutMode,
             gridColumns = initialGridColumns,
+            showRematchButtonInList = initialShowRematchButtonInList,
             videoOpenMode = if (initialVideoOpenMode == VideoOpenMode.ExternalPlayer &&
                 initialVideoPlayerComponentName.isNullOrBlank()
             ) {
@@ -122,8 +178,22 @@ class AppViewModel(
             iwaraMatchMode = initialIwaraMatchMode,
             matchSearchTimeoutSecondsText = initialMatchSearchTimeoutSeconds.toString(),
             matchSearchTimeoutSeconds = initialMatchSearchTimeoutSeconds,
+            apiProbeTimeoutSecondsText = initialApiProbeTimeoutSeconds.toString(),
+            apiProbeTimeoutSeconds = initialApiProbeTimeoutSeconds,
+            apiEndpointTemplatesText = initialApiEndpointTemplatesText,
+            apiEndpointTemplates = initialApiEndpointTemplates,
+            allowPageFallback = initialAllowPageFallback,
+            fetchSearchResultDetailsWithApi = initialFetchSearchResultDetailsWithApi,
+            maxSearchApiDetailsText = initialMaxSearchApiDetails.toString(),
+            maxSearchApiDetails = initialMaxSearchApiDetails,
             batchMatchThreadsText = initialBatchMatchThreads.toString(),
-            batchMatchThreads = initialBatchMatchThreads
+            batchMatchThreads = initialBatchMatchThreads,
+            autoMatchSingleHighConfidence = initialAutoMatchSingleHighConfidence,
+            autoMatchTitleSimilarityThresholdText = initialAutoMatchTitleSimilarityThreshold.toString(),
+            autoMatchTitleSimilarityThreshold = initialAutoMatchTitleSimilarityThreshold,
+            autoMatchDurationToleranceSecondsText = initialAutoMatchDurationToleranceSeconds.toString(),
+            autoMatchDurationToleranceSeconds = initialAutoMatchDurationToleranceSeconds,
+            autoMatchSkipNoId = initialAutoMatchSkipNoId
         )
     )
     val settingsState: StateFlow<SettingsUiState> = _settingsState
@@ -292,6 +362,16 @@ class AppViewModel(
         }
     }
 
+    fun setShowRematchButtonInList(enabled: Boolean) {
+        prefs.edit()
+            .putBoolean(KEY_SHOW_REMATCH_BUTTON_IN_LIST, enabled)
+            .apply()
+
+        _settingsState.update {
+            it.copy(showRematchButtonInList = enabled)
+        }
+    }
+
     fun setVideoOpenMode(mode: VideoOpenMode) {
         prefs.edit()
             .putString(KEY_VIDEO_OPEN_MODE, mode.name)
@@ -359,6 +439,74 @@ class AppViewModel(
         }
     }
 
+    fun setApiProbeTimeoutSeconds(raw: String) {
+        val value = raw.toIntOrNull()?.coerceIn(5, 120)
+        _settingsState.update {
+            if (value == null) {
+                it.copy(apiProbeTimeoutSecondsText = raw)
+            } else {
+                prefs.edit().putInt(KEY_API_PROBE_TIMEOUT_SECONDS, value).apply()
+                it.copy(
+                    apiProbeTimeoutSecondsText = value.toString(),
+                    apiProbeTimeoutSeconds = value
+                )
+            }
+        }
+    }
+
+    fun setApiEndpointTemplates(raw: String) {
+        val templates = parseApiEndpointTemplates(raw)
+        _settingsState.update {
+            if (templates.isEmpty()) {
+                it.copy(apiEndpointTemplatesText = raw)
+            } else {
+                prefs.edit().putString(KEY_API_ENDPOINT_TEMPLATES, raw).apply()
+                it.copy(
+                    apiEndpointTemplatesText = raw,
+                    apiEndpointTemplates = templates
+                )
+            }
+        }
+    }
+
+    fun resetApiEndpointTemplates() {
+        val text = IwaraMatchNetworkDefaults.apiEndpointTemplates.joinToString("\n")
+        prefs.edit()
+            .putString(KEY_API_ENDPOINT_TEMPLATES, text)
+            .apply()
+        _settingsState.update {
+            it.copy(
+                apiEndpointTemplatesText = text,
+                apiEndpointTemplates = IwaraMatchNetworkDefaults.apiEndpointTemplates
+            )
+        }
+    }
+
+    fun setAllowPageFallback(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_ALLOW_PAGE_FALLBACK, enabled).apply()
+        _settingsState.update { it.copy(allowPageFallback = enabled) }
+    }
+
+    fun setFetchSearchResultDetailsWithApi(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_FETCH_SEARCH_RESULT_DETAILS_WITH_API, enabled).apply()
+        _settingsState.update { it.copy(fetchSearchResultDetailsWithApi = enabled) }
+    }
+
+    fun setMaxSearchApiDetails(raw: String) {
+        val value = raw.toIntOrNull()?.coerceIn(1, 30)
+        _settingsState.update {
+            if (value == null) {
+                it.copy(maxSearchApiDetailsText = raw)
+            } else {
+                prefs.edit().putInt(KEY_MAX_SEARCH_API_DETAILS, value).apply()
+                it.copy(
+                    maxSearchApiDetailsText = value.toString(),
+                    maxSearchApiDetails = value
+                )
+            }
+        }
+    }
+
     fun setBatchMatchThreads(raw: String) {
         val value = raw.toIntOrNull()?.coerceIn(1, 4)
         _settingsState.update {
@@ -372,6 +520,48 @@ class AppViewModel(
                 )
             }
         }
+    }
+
+    fun setAutoMatchSingleHighConfidence(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_AUTO_MATCH_SINGLE_HIGH_CONFIDENCE, enabled).apply()
+        _settingsState.update { it.copy(autoMatchSingleHighConfidence = enabled) }
+    }
+
+    fun setAutoMatchTitleSimilarityThreshold(raw: String) {
+        val value = raw.toIntOrNull()?.coerceIn(1, 100)
+        _settingsState.update {
+            if (value == null) {
+                it.copy(autoMatchTitleSimilarityThresholdText = raw)
+            } else {
+                prefs.edit().putInt(KEY_AUTO_MATCH_TITLE_SIMILARITY_THRESHOLD, value).apply()
+                it.copy(
+                    autoMatchTitleSimilarityThresholdText = value.toString(),
+                    autoMatchTitleSimilarityThreshold = value
+                )
+            }
+        }
+    }
+
+    fun setAutoMatchDurationToleranceSeconds(raw: String) {
+        val value = raw.toIntOrNull()?.coerceIn(0, 60)
+        _settingsState.update {
+            if (value == null) {
+                it.copy(autoMatchDurationToleranceSecondsText = raw)
+            } else {
+                prefs.edit().putInt(KEY_AUTO_MATCH_DURATION_TOLERANCE_SECONDS, value).apply()
+                it.copy(
+                    autoMatchDurationToleranceSecondsText = value.toString(),
+                    autoMatchDurationToleranceSeconds = value
+                )
+            }
+        }
+    }
+
+    fun setAutoMatchSkipNoId(enabled: Boolean) {
+        prefs.edit()
+            .putBoolean(KEY_AUTO_MATCH_SKIP_NO_ID, enabled)
+            .apply()
+        _settingsState.update { it.copy(autoMatchSkipNoId = enabled) }
     }
 
     fun setFilterTab(tab: FilterTab) {
@@ -474,7 +664,8 @@ class AppViewModel(
             }
             val result = iwaraRepository.searchTitle(
                 title = query,
-                timeoutMillis = _settingsState.value.matchSearchTimeoutSeconds * 1000L
+                timeoutMillis = _settingsState.value.matchSearchTimeoutSeconds * 1000L,
+                options = currentMatchOptions()
             )
             _matchState.update {
                 it.copy(
@@ -520,7 +711,8 @@ class AppViewModel(
             }
             val result = iwaraRepository.fetchById(
                 id = id,
-                timeoutMillis = _settingsState.value.matchSearchTimeoutSeconds * 1000L
+                timeoutMillis = _settingsState.value.matchSearchTimeoutSeconds * 1000L,
+                options = currentMatchOptions()
             )
             _matchState.update {
                 it.copy(
@@ -545,21 +737,12 @@ class AppViewModel(
             runCatching {
                 val enriched = enrichIwaraMeta(meta)
                 videoRepository.bindIwaraMeta(video.uriString, enriched, "manual_matched")
-                if (taskId != null) {
-                    val task = videoRepository.getMatchTask(taskId)
-                    if (task != null) {
-                        videoRepository.replaceCandidatesForTask(task.id, listOf(enriched), enriched.id)
-                        videoRepository.updateMatchTask(
-                            task.copy(
-                                status = MatchTaskStatus.AutoMatched,
-                                matchedIwaraId = enriched.id,
-                                candidateCount = 1,
-                                errorMessage = null,
-                                updatedAt = System.currentTimeMillis()
-                            )
-                        )
-                    }
-                }
+                upsertSuccessfulMatchTask(
+                    video = video,
+                    meta = enriched,
+                    query = _matchState.value.query.trim().ifBlank { enriched.id },
+                    sourceTaskId = taskId
+                )
                 videoRepository.findVideoByUri(video.uriString)?.let { openVideoDetail(it) }
             }.onSuccess {
                 _matchState.update { it.copy(isBinding = false) }
@@ -573,6 +756,37 @@ class AppViewModel(
                 }
             }
         }
+    }
+
+    private suspend fun upsertSuccessfulMatchTask(
+        video: VideoItem,
+        meta: IwaraVideoMeta,
+        query: String,
+        sourceTaskId: Long? = null
+    ) {
+        val root = _libraryState.value.folderUriString ?: return
+        val existingTask = sourceTaskId
+            ?.let { videoRepository.getMatchTask(it) }
+            ?: videoRepository.getTasksByVideoUri(video.uriString).firstOrNull()
+        val task = existingTask ?: videoRepository.getMatchTask(
+            videoRepository.createMatchTask(
+                video = video,
+                libraryRootUriString = root,
+                query = query
+            )
+        ) ?: return
+
+        videoRepository.replaceCandidatesForTask(task.id, listOf(meta), meta.id)
+        videoRepository.updateMatchTask(
+            task.copy(
+                query = query,
+                status = MatchTaskStatus.AutoMatched,
+                matchedIwaraId = meta.id,
+                candidateCount = 1,
+                errorMessage = null,
+                updatedAt = System.currentTimeMillis()
+            )
+        )
     }
 
     fun openMatchTask(task: MatchTaskEntity) {
@@ -724,26 +938,71 @@ class AppViewModel(
         if (_libraryState.value.isBatchMatching) return
         viewModelScope.launch {
             val root = _libraryState.value.folderUriString ?: return@launch
-            _libraryState.update { it.copy(isBatchMatching = true) }
-            val videos = videoRepository.getUnqueuedUnmatchedVideos(root)
-            val semaphore = Semaphore(_settingsState.value.batchMatchThreads)
-            coroutineScope {
-                videos.map { video ->
-                    async {
-                        semaphore.withPermit {
-                            val taskId = videoRepository.createMatchTask(
-                                video = video,
-                                libraryRootUriString = root,
-                                query = buildTaskQuery(video)
-                            )
-                            val task = videoRepository.getMatchTask(taskId) ?: return@withPermit
-                            processOneBatchVideo(video, task)
+            _libraryState.update { it.copy(isBatchMatching = true, error = null) }
+            try {
+                val videos = videoRepository.getUnqueuedUnmatchedVideos(root)
+                val semaphore = Semaphore(_settingsState.value.batchMatchThreads)
+                coroutineScope {
+                    videos.map { video ->
+                        async {
+                            semaphore.withPermit {
+                                val taskId = videoRepository.createMatchTask(
+                                    video = video,
+                                    libraryRootUriString = root,
+                                    query = buildTaskQuery(video)
+                                )
+                                val task = videoRepository.getMatchTask(taskId) ?: return@withPermit
+                                processOneBatchVideo(video, task)
+                            }
                         }
-                    }
-                }.awaitAll()
+                    }.awaitAll()
+                }
+                setMatchTaskFilter(MatchTaskFilter.All)
+            } finally {
+                _libraryState.update { it.copy(isBatchMatching = false) }
             }
-            _libraryState.update { it.copy(isBatchMatching = false) }
-            setMatchTaskFilter(MatchTaskFilter.All)
+        }
+    }
+
+    fun startBatchRematchMatched() {
+        if (_libraryState.value.isBatchMatching) return
+        viewModelScope.launch {
+            val root = _libraryState.value.folderUriString ?: return@launch
+            val videos = videoRepository.getRematchableVideos(root)
+            if (videos.isEmpty()) {
+                _libraryState.update {
+                    it.copy(error = "没有可重新匹配的视频：需要已有 Iwara ID 或文件名能解析出 Iwara ID")
+                }
+                return@launch
+            }
+
+            _libraryState.update { it.copy(isBatchMatching = true, error = null) }
+            try {
+                val semaphore = Semaphore(_settingsState.value.batchMatchThreads)
+                coroutineScope {
+                    videos.map { video ->
+                        async {
+                            semaphore.withPermit {
+                                val id = video.matchedIwaraId?.trim().orEmpty()
+                                val query = id.ifBlank { video.sourceVideoId?.trim().orEmpty() }
+                                val task = videoRepository.getTasksByVideoUri(video.uriString).firstOrNull()
+                                    ?: videoRepository.getMatchTask(
+                                        videoRepository.createMatchTask(
+                                            video = video,
+                                            libraryRootUriString = root,
+                                            query = query.ifBlank { buildMatchQuery(video) }
+                                        )
+                                    )
+                                    ?: return@withPermit
+                                processOneMatchedRefresh(video, task, query)
+                            }
+                        }
+                    }.awaitAll()
+                }
+                setMatchTaskFilter(MatchTaskFilter.All)
+            } finally {
+                _libraryState.update { it.copy(isBatchMatching = false) }
+            }
         }
     }
 
@@ -769,6 +1028,49 @@ class AppViewModel(
 
             _playerState.update {
                 it.copy(video = null)
+            }
+        }
+    }
+
+    fun exportDatabase(uri: Uri) {
+        viewModelScope.launch {
+            runCatching {
+                videoRepository.exportDatabaseTo(uri)
+            }.onSuccess {
+                _settingsState.update {
+                    it.copy(message = "数据库导出成功", error = null)
+                }
+            }.onFailure { error ->
+                _settingsState.update {
+                    it.copy(
+                        message = null,
+                        error = "数据库导出失败：${error.message ?: error::class.java.simpleName}"
+                    )
+                }
+            }
+        }
+    }
+
+    fun importDatabase(uri: Uri) {
+        viewModelScope.launch {
+            runCatching {
+                videoRepository.importDatabaseFrom(uri)
+            }.onSuccess {
+                if (!_libraryState.value.folderUriString.isNullOrBlank()) {
+                    observeLibrary()
+                    observeFiltersAndTasks()
+                    observeSearchIfNeeded()
+                }
+                _settingsState.update {
+                    it.copy(message = "数据库导入成功", error = null)
+                }
+            }.onFailure { error ->
+                _settingsState.update {
+                    it.copy(
+                        message = null,
+                        error = "数据库导入失败：${error.message ?: error::class.java.simpleName}"
+                    )
+                }
             }
         }
     }
@@ -1055,6 +1357,18 @@ class AppViewModel(
             )
         )
 
+        if (_settingsState.value.autoMatchSkipNoId && video.sourceVideoId.isNullOrBlank()) {
+            videoRepository.updateMatchTask(
+                task.copy(
+                    status = MatchTaskStatus.Skipped,
+                    candidateCount = 0,
+                    errorMessage = "已按设置跳过：本地文件名没有解析到 Iwara ID",
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+            return
+        }
+
         try {
             val result = searchByMode(video, task.query, idOnly = false)
             val candidates = result.videos
@@ -1110,12 +1424,87 @@ class AppViewModel(
         }
     }
 
+    private suspend fun processOneMatchedRefresh(
+        video: VideoItem,
+        task: com.ice.iwaramanager.data.local.entity.MatchTaskEntity,
+        id: String
+    ) {
+        val targetId = id.trim()
+        videoRepository.updateMatchTask(
+            task.copy(
+                query = targetId.ifBlank { task.query },
+                status = MatchTaskStatus.Running,
+                errorMessage = null,
+                updatedAt = System.currentTimeMillis()
+            )
+        )
+        if (targetId.isBlank()) {
+            videoRepository.updateMatchTask(
+                task.copy(
+                    status = MatchTaskStatus.Failed,
+                    candidateCount = 0,
+                    errorMessage = "已匹配记录缺少 Iwara ID，无法重新匹配",
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+            return
+        }
+
+        try {
+            val result = iwaraRepository.fetchById(
+                id = targetId,
+                timeoutMillis = _settingsState.value.matchSearchTimeoutSeconds * 1000L,
+                options = currentMatchOptions()
+            )
+            val meta = result.videos.firstOrNull { it.id == targetId } ?: result.videos.firstOrNull()
+            if (meta == null) {
+                videoRepository.replaceCandidatesForTask(task.id, emptyList())
+                videoRepository.updateMatchTask(
+                    task.copy(
+                        query = targetId,
+                        status = MatchTaskStatus.Failed,
+                        candidateCount = 0,
+                        errorMessage = result.failureReason ?: result.diagnosticSummary,
+                        updatedAt = System.currentTimeMillis()
+                    )
+                )
+                return
+            }
+
+            val enriched = enrichIwaraMeta(meta)
+            videoRepository.bindIwaraMeta(video.uriString, enriched, "auto_matched")
+            videoRepository.replaceCandidatesForTask(task.id, listOf(enriched), enriched.id)
+            videoRepository.updateMatchTask(
+                task.copy(
+                    query = targetId,
+                    status = MatchTaskStatus.AutoMatched,
+                    matchedIwaraId = enriched.id,
+                    candidateCount = 1,
+                    errorMessage = null,
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            videoRepository.updateMatchTask(
+                task.copy(
+                    query = targetId,
+                    status = MatchTaskStatus.Failed,
+                    errorMessage = "重新匹配异常：${error.message ?: error::class.java.simpleName}",
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+        }
+    }
+
     private suspend fun searchByMode(
         video: VideoItem?,
         query: String,
         idOnly: Boolean
     ): com.ice.iwaramanager.data.model.IwaraSearchMetaResult {
         val timeoutMillis = _settingsState.value.matchSearchTimeoutSeconds * 1000L
+        val options = currentMatchOptions()
         val mode = if (idOnly) IwaraMatchMode.IdOnly else _settingsState.value.iwaraMatchMode
         val id = video?.sourceVideoId?.trim().orEmpty()
 
@@ -1129,22 +1518,22 @@ class AppViewModel(
                         failureReason = "文件名中没有解析到 Iwara ID"
                     )
                 } else {
-                    iwaraRepository.fetchById(id, timeoutMillis)
+                    iwaraRepository.fetchById(id, timeoutMillis, options)
                 }
             }
 
-            IwaraMatchMode.TitleOnly -> iwaraRepository.searchTitle(query, timeoutMillis)
+            IwaraMatchMode.TitleOnly -> iwaraRepository.searchTitle(query, timeoutMillis, options)
 
             IwaraMatchMode.IdThenTitle -> {
                 if (id.isNotBlank()) {
-                    val byId = iwaraRepository.fetchById(id, timeoutMillis)
+                    val byId = iwaraRepository.fetchById(id, timeoutMillis, options)
                     if (byId.videos.isNotEmpty()) {
                         byId
                     } else {
-                        iwaraRepository.searchTitle(query, timeoutMillis)
+                        iwaraRepository.searchTitle(query, timeoutMillis, options)
                     }
                 } else {
-                    iwaraRepository.searchTitle(query, timeoutMillis)
+                    iwaraRepository.searchTitle(query, timeoutMillis, options)
                 }
             }
         }
@@ -1153,6 +1542,7 @@ class AppViewModel(
     private suspend fun enrichIwaraMeta(meta: IwaraVideoMeta): IwaraVideoMeta {
         val needsDetail = meta.authorName.isNullOrBlank() ||
             meta.authorUsername.isNullOrBlank() ||
+            meta.authorAvatarUrl.isNullOrBlank() ||
             meta.thumbnailUrl.isNullOrBlank() ||
             meta.tags.isEmpty() ||
             meta.description.isNullOrBlank()
@@ -1161,7 +1551,8 @@ class AppViewModel(
         val detail = runCatching {
             iwaraRepository.fetchById(
                 id = meta.id,
-                timeoutMillis = _settingsState.value.matchSearchTimeoutSeconds * 1000L
+                timeoutMillis = _settingsState.value.matchSearchTimeoutSeconds * 1000L,
+                options = currentMatchOptions()
             ).videos.firstOrNull { it.id == meta.id }
         }.getOrNull() ?: return meta
 
@@ -1171,6 +1562,7 @@ class AppViewModel(
             authorId = detail.authorId ?: meta.authorId,
             authorName = detail.authorName ?: meta.authorName,
             authorUsername = detail.authorUsername ?: meta.authorUsername,
+            authorAvatarUrl = detail.authorAvatarUrl ?: meta.authorAvatarUrl,
             thumbnailUrl = detail.thumbnailUrl ?: meta.thumbnailUrl,
             rating = detail.rating ?: meta.rating,
             visibility = detail.visibility ?: meta.visibility,
@@ -1196,7 +1588,28 @@ class AppViewModel(
         }
         if (!_settingsState.value.autoMatchSingleHighConfidence || candidates.size != 1) return null
         val candidate = candidates.first()
-        return if (titleSimilarity(query, candidate.title) >= 70) candidate else null
+        val titleMatched = titleSimilarity(query, candidate.title) >=
+            _settingsState.value.autoMatchTitleSimilarityThreshold
+        val durationMatched = durationMatches(
+            localDurationMs = video.durationMs,
+            remoteDurationSeconds = candidate.durationSeconds,
+            toleranceSeconds = _settingsState.value.autoMatchDurationToleranceSeconds
+        )
+        return if (titleMatched && durationMatched) {
+            candidate
+        } else {
+            null
+        }
+    }
+
+    private fun durationMatches(
+        localDurationMs: Long?,
+        remoteDurationSeconds: Long?,
+        toleranceSeconds: Int
+    ): Boolean {
+        val localSeconds = localDurationMs?.takeIf { it > 0L }?.let { it / 1000L } ?: return false
+        val remoteSeconds = remoteDurationSeconds?.takeIf { it > 0L } ?: return false
+        return kotlin.math.abs(localSeconds - remoteSeconds) <= toleranceSeconds
     }
 
     private fun titleSimilarity(a: String, b: String): Int {
@@ -1242,6 +1655,28 @@ class AppViewModel(
         }
     }
 
+    private fun currentMatchOptions(): IwaraMatchNetworkOptions {
+        val state = _settingsState.value
+        val templates = state.apiEndpointTemplates.ifEmpty { IwaraMatchNetworkDefaults.apiEndpointTemplates }
+        return IwaraMatchNetworkOptions(
+            apiEndpointTemplates = templates,
+            apiProbeTimeoutMillis = state.apiProbeTimeoutSeconds * 1000L,
+            allowPageFallback = state.allowPageFallback,
+            fetchSearchResultDetailsWithApi = state.fetchSearchResultDetailsWithApi,
+            maxSearchApiDetails = state.maxSearchApiDetails
+        )
+    }
+
+    private fun parseApiEndpointTemplates(raw: String): List<String> {
+        return raw
+            .split('\n', ',', ';')
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .filter { it.contains("{id}") }
+            .distinct()
+            .take(12)
+    }
+
     private fun normalizeIwaraId(value: String): String? {
         val raw = value
             .substringAfterLast("/video/")
@@ -1273,12 +1708,22 @@ class AppViewModel(
         const val KEY_FOLDER_URI = "folder_uri"
         const val KEY_LAYOUT_MODE = "layout_mode"
         const val KEY_GRID_COLUMNS = "grid_columns"
+        const val KEY_SHOW_REMATCH_BUTTON_IN_LIST = "show_rematch_button_in_list"
         const val KEY_VIDEO_OPEN_MODE = "video_open_mode"
         const val KEY_VIDEO_PLAYER_COMPONENT = "video_player_component"
         const val KEY_VIDEO_PLAYER_LABEL = "video_player_label"
         const val KEY_IWARA_MATCH_MODE = "iwara_match_mode"
         const val KEY_MATCH_SEARCH_TIMEOUT_SECONDS = "match_search_timeout_seconds"
+        const val KEY_API_PROBE_TIMEOUT_SECONDS = "api_probe_timeout_seconds"
+        const val KEY_API_ENDPOINT_TEMPLATES = "api_endpoint_templates"
+        const val KEY_ALLOW_PAGE_FALLBACK = "allow_page_fallback"
+        const val KEY_FETCH_SEARCH_RESULT_DETAILS_WITH_API = "fetch_search_result_details_with_api"
+        const val KEY_MAX_SEARCH_API_DETAILS = "max_search_api_details"
         const val KEY_BATCH_MATCH_THREADS = "batch_match_threads"
+        const val KEY_AUTO_MATCH_SINGLE_HIGH_CONFIDENCE = "auto_match_single_high_confidence"
+        const val KEY_AUTO_MATCH_TITLE_SIMILARITY_THRESHOLD = "auto_match_title_similarity_threshold"
+        const val KEY_AUTO_MATCH_DURATION_TOLERANCE_SECONDS = "auto_match_duration_tolerance_seconds"
+        const val KEY_AUTO_MATCH_SKIP_NO_ID = "auto_match_skip_no_id"
         const val SKIPPED_FROM_UNQUEUED_MESSAGE = "从未匹配列表手动跳过"
     }
 }

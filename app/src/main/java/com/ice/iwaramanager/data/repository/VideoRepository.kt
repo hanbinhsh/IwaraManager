@@ -19,19 +19,29 @@ import com.ice.iwaramanager.data.model.VideoItem
 import com.ice.iwaramanager.domain.parser.IwaraFilenameParser
 import com.ice.iwaramanager.domain.scanner.ScanProgress
 import com.ice.iwaramanager.domain.scanner.VideoScanner
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
+import java.io.File
 
 class VideoRepository(
     context: Context
 ) {
     private val appContext = context.applicationContext
-    private val db = AppDatabase.get(appContext)
-    private val videoDao = db.videoDao()
-    private val tagDao = db.tagDao()
-    private val matchTaskDao = db.matchTaskDao()
+    private var db = AppDatabase.get(appContext)
+    private var videoDao = db.videoDao()
+    private var tagDao = db.tagDao()
+    private var matchTaskDao = db.matchTaskDao()
     private val scanner = VideoScanner(appContext)
+
+    private fun reopenDatabase() {
+        db = AppDatabase.get(appContext)
+        videoDao = db.videoDao()
+        tagDao = db.tagDao()
+        matchTaskDao = db.matchTaskDao()
+    }
 
     fun observeVideos(
         libraryRootUriString: String
@@ -96,6 +106,20 @@ class VideoRepository(
         libraryRootUriString: String
     ): List<VideoItem> {
         return videoDao.getUnqueuedUnmatchedVideos(libraryRootUriString)
+            .map { it.toVideoItem() }
+    }
+
+    suspend fun getMatchedVideos(
+        libraryRootUriString: String
+    ): List<VideoItem> {
+        return videoDao.getMatchedVideos(libraryRootUriString)
+            .map { it.toVideoItem() }
+    }
+
+    suspend fun getRematchableVideos(
+        libraryRootUriString: String
+    ): List<VideoItem> {
+        return videoDao.getRematchableVideos(libraryRootUriString)
             .map { it.toVideoItem() }
     }
 
@@ -181,6 +205,7 @@ class VideoRepository(
                 remoteAuthorId = old?.remoteAuthorId,
                 remoteAuthorName = old?.remoteAuthorName,
                 remoteAuthorUsername = old?.remoteAuthorUsername,
+                remoteAuthorAvatarUrl = old?.remoteAuthorAvatarUrl,
                 remoteThumbnailUrl = old?.remoteThumbnailUrl,
                 remoteRating = old?.remoteRating,
                 remoteVisibility = old?.remoteVisibility,
@@ -330,6 +355,7 @@ class VideoRepository(
                 remoteAuthorId = meta.authorId,
                 remoteAuthorName = meta.authorName,
                 remoteAuthorUsername = meta.authorUsername,
+                remoteAuthorAvatarUrl = meta.authorAvatarUrl,
                 remoteThumbnailUrl = meta.thumbnailUrl,
                 remoteRating = meta.rating,
                 remoteVisibility = meta.visibility,
@@ -374,5 +400,49 @@ class VideoRepository(
         libraryRootUriString: String
     ) {
         videoDao.deleteByRoot(libraryRootUriString)
+    }
+
+    suspend fun exportDatabaseTo(uri: Uri) = withContext(Dispatchers.IO) {
+        db.openHelper.writableDatabase.query("PRAGMA wal_checkpoint(FULL)").close()
+        val databaseFile = appContext.getDatabasePath(DATABASE_NAME)
+        require(databaseFile.exists()) { "数据库文件不存在" }
+        appContext.contentResolver.openOutputStream(uri)?.use { output ->
+            databaseFile.inputStream().use { input ->
+                input.copyTo(output)
+            }
+        } ?: error("无法打开导出位置")
+    }
+
+    suspend fun importDatabaseFrom(uri: Uri) = withContext(Dispatchers.IO) {
+        AppDatabase.closeCurrent()
+        try {
+            val databaseFile = appContext.getDatabasePath(DATABASE_NAME)
+            databaseFile.parentFile?.mkdirs()
+            deleteDatabaseSidecarFiles(databaseFile)
+
+            appContext.contentResolver.openInputStream(uri)?.use { input ->
+                databaseFile.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            } ?: error("无法打开导入文件")
+        } finally {
+            reopenDatabase()
+        }
+    }
+
+    private fun deleteDatabaseSidecarFiles(databaseFile: File) {
+        listOf(
+            databaseFile,
+            File(databaseFile.path + "-wal"),
+            File(databaseFile.path + "-shm")
+        ).forEach { file ->
+            if (file.exists()) {
+                file.delete()
+            }
+        }
+    }
+
+    private companion object {
+        const val DATABASE_NAME = "iwara_manager.db"
     }
 }

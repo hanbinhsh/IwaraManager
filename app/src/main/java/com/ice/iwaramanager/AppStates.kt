@@ -5,6 +5,7 @@ import com.ice.iwaramanager.data.local.entity.MatchCandidateEntity
 import com.ice.iwaramanager.data.local.entity.MatchTaskEntity
 import com.ice.iwaramanager.data.model.FilterTab
 import com.ice.iwaramanager.data.model.IwaraMatchMode
+import com.ice.iwaramanager.data.model.IwaraMatchNetworkDefaults
 import com.ice.iwaramanager.data.model.IwaraVideoMeta
 import com.ice.iwaramanager.data.model.LibraryLayoutMode
 import com.ice.iwaramanager.data.model.MatchTaskFilter
@@ -50,17 +51,32 @@ data class SettingsUiState(
     val folderUriString: String? = null,
     val layoutMode: LibraryLayoutMode = LibraryLayoutMode.Grid,
     val gridColumns: Int = 2,
+    val showRematchButtonInList: Boolean = true,
     val videoOpenMode: VideoOpenMode = VideoOpenMode.InApp,
     val selectedVideoPlayerComponentName: String? = null,
     val selectedVideoPlayerLabel: String? = null,
     val iwaraMatchMode: IwaraMatchMode = IwaraMatchMode.IdThenTitle,
     val matchSearchTimeoutSecondsText: String = "60",
     val matchSearchTimeoutSeconds: Int = 60,
+    val apiProbeTimeoutSecondsText: String = "30",
+    val apiProbeTimeoutSeconds: Int = 30,
+    val apiEndpointTemplatesText: String = IwaraMatchNetworkDefaults.apiEndpointTemplates.joinToString("\n"),
+    val apiEndpointTemplates: List<String> = IwaraMatchNetworkDefaults.apiEndpointTemplates,
+    val allowPageFallback: Boolean = false,
+    val fetchSearchResultDetailsWithApi: Boolean = true,
+    val maxSearchApiDetailsText: String = "10",
+    val maxSearchApiDetails: Int = 10,
     val batchMatchThreadsText: String = "1",
     val batchMatchThreads: Int = 1,
     val autoMatchSingleHighConfidence: Boolean = true,
+    val autoMatchTitleSimilarityThresholdText: String = "90",
+    val autoMatchTitleSimilarityThreshold: Int = 90,
+    val autoMatchDurationToleranceSecondsText: String = "2",
+    val autoMatchDurationToleranceSeconds: Int = 2,
+    val autoMatchSkipNoId: Boolean = false,
     val isScanning: Boolean = false,
     val videoCount: Int = 0,
+    val message: String? = null,
     val error: String? = null
 )
 

@@ -22,6 +22,7 @@ data class VideoItem(
     val remoteAuthorId: String? = null,
     val remoteAuthorName: String? = null,
     val remoteAuthorUsername: String? = null,
+    val remoteAuthorAvatarUrl: String? = null,
     val remoteThumbnailUrl: String? = null,
     val remoteRating: String? = null,
     val remoteVisibility: String? = null,

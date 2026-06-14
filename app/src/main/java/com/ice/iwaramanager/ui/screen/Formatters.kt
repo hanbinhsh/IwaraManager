@@ -1,9 +1,16 @@
 package com.ice.iwaramanager.ui.screen
 
 import com.ice.iwaramanager.data.model.VideoItem
+import java.time.Instant
+import java.time.LocalDateTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+
+private val DisplayDateTimeFormatter: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
 
 fun formatDuration(
     durationMs: Long?
@@ -45,9 +52,28 @@ fun formatDateTime(
     }
 
     return SimpleDateFormat(
-        "yyyy-MM-dd HH:mm",
+        "yyyy-MM-dd HH:mm:ss",
         Locale.getDefault()
     ).format(Date(millis))
+}
+
+fun formatRemoteDateTime(
+    value: String?
+): String {
+    if (value.isNullOrBlank()) return "未知"
+    return runCatching {
+        Instant.parse(value)
+            .atZone(ZoneId.systemDefault())
+            .format(DisplayDateTimeFormatter)
+    }.recoverCatching {
+        LocalDateTime.parse(value.substringBeforeLast("Z"))
+            .atZone(ZoneId.systemDefault())
+            .format(DisplayDateTimeFormatter)
+    }.getOrElse {
+        value.replace('T', ' ')
+            .removeSuffix("Z")
+            .substringBefore(".")
+    }
 }
 
 fun buildVideoInfoLine(

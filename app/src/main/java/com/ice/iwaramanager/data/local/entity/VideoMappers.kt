@@ -22,6 +22,7 @@ fun VideoEntity.toVideoItem(): VideoItem {
         remoteAuthorId = remoteAuthorId,
         remoteAuthorName = remoteAuthorName,
         remoteAuthorUsername = remoteAuthorUsername,
+        remoteAuthorAvatarUrl = remoteAuthorAvatarUrl,
         remoteThumbnailUrl = remoteThumbnailUrl,
         remoteRating = remoteRating,
         remoteVisibility = remoteVisibility,

@@ -14,8 +14,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -23,6 +25,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -127,7 +130,15 @@ fun DetailScreen(
 
             AuthorCard(
                 video = video,
-                onAuthorClick = onAuthorClick
+                onAuthorClick = onAuthorClick,
+                onOpenAuthorWeb = { username ->
+                    context.startActivity(
+                        Intent(
+                            Intent.ACTION_VIEW,
+                            Uri.parse("https://www.iwara.tv/profile/$username")
+                        )
+                    )
+                }
             )
 
             TagSectionCard(
@@ -147,7 +158,10 @@ private fun HeaderCard(
     video: VideoItem
 ) {
     ElevatedCard(
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+        )
     ) {
         Row(
             modifier = Modifier.padding(14.dp),
@@ -247,7 +261,10 @@ private fun VideoInfoTabsCard(
     var selectedTab by remember(video.uriString) { mutableStateOf(0) }
 
     ElevatedCard(
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+        )
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
@@ -344,15 +361,16 @@ private fun RemoteInfoContent(
             ).joinToString(" · ")
         )
     }
-    InfoLine("发布时间", video.remoteCreatedAt ?: "未知")
-    InfoLine("更新时间", video.remoteUpdatedAt ?: "未知")
+    InfoLine("发布时间", formatRemoteDateTime(video.remoteCreatedAt))
+    InfoLine("更新时间", formatRemoteDateTime(video.remoteUpdatedAt))
 }
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AuthorCard(
     video: VideoItem,
-    onAuthorClick: (String) -> Unit
+    onAuthorClick: (String) -> Unit,
+    onOpenAuthorWeb: (String) -> Unit
 ) {
     val username = video.remoteAuthorUsername?.takeIf { it.isNotBlank() }
     val authorId = video.remoteAuthorId
@@ -365,23 +383,47 @@ private fun AuthorCard(
         ?: authorId
         ?: video.remoteAuthorName?.takeIf { it.isNotBlank() }
 
-    InfoCard(title = "作者") {
+    InfoCard(title = null) {
         if (authorKey != null) {
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalArrangement = Arrangement.spacedBy(2.dp)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 0.dp) {
-                    FilterChip(
-                        selected = false,
-                        onClick = { onAuthorClick(authorKey) },
-                        label = {
-                            Text(
-                                text = authorLabel,
-                                style = MaterialTheme.typography.labelSmall
-                            )
-                        },
-                        modifier = Modifier.height(28.dp)
+                AuthorAvatar(
+                    avatarUrl = video.remoteAuthorAvatarUrl,
+                    label = authorLabel
+                )
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    CompositionLocalProvider(LocalMinimumInteractiveComponentSize provides 0.dp) {
+                        FilterChip(
+                            selected = false,
+                            onClick = { onAuthorClick(authorKey) },
+                            label = {
+                                Text(
+                                    text = authorLabel,
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            },
+                            modifier = Modifier.height(28.dp)
+                        )
+                    }
+                    Text(
+                        text = username ?: "用户名未知",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                FilledTonalIconButton(
+                    onClick = { username?.let(onOpenAuthorWeb) },
+                    enabled = username != null
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Public,
+                        contentDescription = "打开作者主页"
                     )
                 }
             }
@@ -391,9 +433,6 @@ private fun AuthorCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
-        InfoLine("名称", video.remoteAuthorName ?: "未知")
-        InfoLine("用户名", username ?: "未知")
-        InfoLine("ID", authorId ?: "未知")
     }
 }
 
@@ -467,21 +506,54 @@ private fun DescriptionCard(
 
 @Composable
 private fun InfoCard(
-    title: String,
+    title: String?,
     content: @Composable ColumnScope.() -> Unit
 ) {
     ElevatedCard(
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.elevatedCardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+        )
     ) {
         Column(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleSmall
-            )
+            if (!title.isNullOrBlank()) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleSmall
+                )
+            }
             content()
+        }
+    }
+}
+
+@Composable
+private fun AuthorAvatar(
+    avatarUrl: String?,
+    label: String
+) {
+    Box(
+        modifier = Modifier
+            .size(48.dp)
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.secondaryContainer),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = label.firstOrNull()?.uppercaseChar()?.toString() ?: "?",
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onSecondaryContainer
+        )
+        if (!avatarUrl.isNullOrBlank()) {
+            AsyncImage(
+                model = avatarUrl,
+                contentDescription = label,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
         }
     }
 }

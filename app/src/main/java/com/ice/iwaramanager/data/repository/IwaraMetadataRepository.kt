@@ -2,6 +2,7 @@ package com.ice.iwaramanager.data.repository
 
 import android.content.Context
 import com.ice.iwaramanager.data.model.IwaraSearchMetaResult
+import com.ice.iwaramanager.data.model.IwaraMatchNetworkOptions
 import com.ice.iwaramanager.data.model.IwaraTagMeta
 import com.ice.iwaramanager.data.model.IwaraVideoMeta
 import com.ice.iwaramanager.data.remote.IwaraSearchWebView
@@ -15,18 +16,67 @@ class IwaraMetadataRepository(
 
     suspend fun fetchById(
         id: String,
-        timeoutMillis: Long
+        timeoutMillis: Long,
+        options: IwaraMatchNetworkOptions = IwaraMatchNetworkOptions()
     ): IwaraSearchMetaResult {
-        val raw = searcher.fetchById(id, timeoutMillis)
+        val raw = searcher.fetchById(id, timeoutMillis, options)
         return parseSearchResult(raw, id)
     }
 
     suspend fun searchTitle(
         title: String,
-        timeoutMillis: Long
+        timeoutMillis: Long,
+        options: IwaraMatchNetworkOptions = IwaraMatchNetworkOptions()
     ): IwaraSearchMetaResult {
-        val raw = searcher.searchByTitle(title, timeoutMillis)
-        return parseSearchResult(raw, title)
+        val raw = searcher.searchByTitle(title, timeoutMillis, options)
+        val searchResult = parseSearchResult(raw, title)
+        if (!options.fetchSearchResultDetailsWithApi || searchResult.videos.isEmpty()) {
+            return searchResult
+        }
+
+        var detailSuccess = 0
+        val detailFailures = mutableListOf<String>()
+        val detailsById = linkedMapOf<String, IwaraVideoMeta>()
+        searchResult.videos.take(options.maxSearchApiDetails).forEach { candidate ->
+            val detailResult = runCatching {
+                fetchById(candidate.id, timeoutMillis, options)
+            }.getOrElse { error ->
+                detailFailures += "${candidate.id}: ${error.message ?: error::class.java.simpleName}"
+                return@forEach
+            }
+            val detail = detailResult.videos.firstOrNull { it.id == candidate.id }
+            if (detail != null) {
+                detailsById[candidate.id] = mergeSearchCandidateWithDetail(candidate, detail)
+                detailSuccess += 1
+            } else {
+                detailFailures += "${candidate.id}: ${detailResult.failureReason ?: detailResult.diagnosticSummary}"
+            }
+        }
+
+        val videos = searchResult.videos.map { candidate ->
+            detailsById[candidate.id] ?: candidate
+        }
+        val summary = buildString {
+            append(searchResult.diagnosticSummary)
+            append("；搜索候选按ID获取详情 $detailSuccess/${minOf(searchResult.videos.size, options.maxSearchApiDetails)}")
+            if (detailFailures.isNotEmpty()) {
+                append("；详情失败 ${detailFailures.size} 个")
+            }
+        }
+        val rawWithDetails = runCatching {
+            val original = JSONObject(searchResult.diagnosticRaw)
+            original
+                .put("summary", summary)
+                .put("searchDetailFetchSuccessIds", JSONArray(detailsById.keys))
+                .put("searchDetailFetchFailures", JSONArray(detailFailures))
+                .toString(2)
+        }.getOrElse { searchResult.diagnosticRaw }
+
+        return searchResult.copy(
+            videos = videos,
+            diagnosticSummary = summary,
+            diagnosticRaw = rawWithDetails
+        )
     }
 
     private fun parseSearchResult(
@@ -116,6 +166,11 @@ class IwaraMetadataRepository(
                 authorUsername = firstString(
                     authorUsername
                 ),
+                authorAvatarUrl = firstString(
+                    candidateMeta?.optString("authorAvatarUrl"),
+                    detailMeta?.optString("authorAvatarUrl"),
+                    serializedAuthor.avatarUrl
+                ),
                 thumbnailUrl = firstString(
                     candidateMeta?.optString("thumbnailUrl"),
                     detailMeta?.optString("thumbnailUrl"),
@@ -196,7 +251,35 @@ class IwaraMetadataRepository(
         )
     }
 
+    private fun mergeSearchCandidateWithDetail(
+        candidate: IwaraVideoMeta,
+        detail: IwaraVideoMeta
+    ): IwaraVideoMeta {
+        return candidate.copy(
+            title = detail.title.ifBlank { candidate.title },
+            description = detail.description ?: candidate.description,
+            authorId = detail.authorId ?: candidate.authorId,
+            authorName = detail.authorName ?: candidate.authorName,
+            authorUsername = detail.authorUsername ?: candidate.authorUsername,
+            authorAvatarUrl = detail.authorAvatarUrl ?: candidate.authorAvatarUrl,
+            thumbnailUrl = detail.thumbnailUrl ?: candidate.thumbnailUrl,
+            rating = detail.rating ?: candidate.rating,
+            visibility = detail.visibility ?: candidate.visibility,
+            createdAt = detail.createdAt ?: candidate.createdAt,
+            updatedAt = detail.updatedAt ?: candidate.updatedAt,
+            durationSeconds = detail.durationSeconds ?: candidate.durationSeconds,
+            likeCount = detail.likeCount ?: candidate.likeCount,
+            viewCount = detail.viewCount ?: candidate.viewCount,
+            commentCount = detail.commentCount ?: candidate.commentCount,
+            tags = if (detail.tags.isNotEmpty()) detail.tags else candidate.tags,
+            rawJson = detail.rawJson ?: candidate.rawJson
+        )
+    }
+
     private fun isBlockingFailure(json: JSONObject): Boolean {
+        if ((json.optJSONArray("results")?.length() ?: 0) > 0) {
+            return false
+        }
         val title = json.optString("pageTitle")
         val timedOut = json.optBoolean("timedOut")
         val bodyTextLength = json.optInt("bodyTextLength")
@@ -275,7 +358,7 @@ class IwaraMetadataRepository(
             value
                 ?.replace(Regex("\\s+"), " ")
                 ?.trim()
-                ?.takeIf { it.isNotBlank() && it != "null" }
+                ?.takeIf { it.isNotBlank() && it != "null" && it != "[object Object]" }
         }
     }
 
@@ -326,7 +409,8 @@ class IwaraMetadataRepository(
     private data class SerializedAuthor(
         val id: String? = null,
         val name: String? = null,
-        val username: String? = null
+        val username: String? = null,
+        val avatarUrl: String? = null
     )
 
     private fun extractSerializedTitle(
@@ -427,12 +511,66 @@ class IwaraMetadataRepository(
             ?.takeUnless { value ->
                 username != null && value.equals(username, ignoreCase = true)
             }
+        val avatarUrl = firstString(
+            firstJsonString(
+                source,
+                "avatarUrl",
+                "avatar_url",
+                "imageUrl",
+                "image_url",
+                "thumbnailUrl",
+                "thumbnail_url",
+                "picture"
+            ),
+            extractAvatarAssetUrl(source),
+            extractAvatarAssetUrl(window)
+        )
 
         return SerializedAuthor(
             id = authorId,
             name = name,
-            username = username
+            username = username,
+            avatarUrl = avatarUrl
         )
+    }
+
+    private fun extractAvatarAssetUrl(
+        source: String
+    ): String? {
+        val avatarObject = Regex(
+            """"avatar"\s*:\s*\{(.{0,2000}?)(?:\}\s*,|\}\s*\}|\})""",
+            setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+        ).find(source)?.groupValues?.getOrNull(1) ?: source
+
+        firstJsonString(
+            avatarObject,
+            "url",
+            "uri",
+            "href",
+            "src",
+            "avatarUrl",
+            "avatar_url",
+            "imageUrl",
+            "image_url",
+            "thumbnailUrl",
+            "thumbnail_url",
+            "originalUrl",
+            "original_url"
+        )?.let { direct ->
+            when {
+                direct.startsWith("http://", ignoreCase = true) ||
+                    direct.startsWith("https://", ignoreCase = true) -> return direct
+                direct.startsWith("/image/", ignoreCase = true) -> return "https://i.iwara.tv$direct"
+                direct.startsWith("image/", ignoreCase = true) -> return "https://i.iwara.tv/$direct"
+            }
+        }
+
+        val assetId = firstJsonString(avatarObject, "id", "uuid", "fileId", "file_id")
+        val assetName = firstJsonString(avatarObject, "name", "filename", "fileName", "file_name")
+        if (!assetId.isNullOrBlank() && !assetName.isNullOrBlank()) {
+            return "https://i.iwara.tv/image/avatar/${encodeUrlPath(assetId)}/${encodeUrlPath(assetName)}"
+        }
+        return null
     }
 
     private fun extractThumbnail(html: String): String? {
@@ -596,5 +734,10 @@ class IwaraMetadataRepository(
         return runCatching {
             java.net.URLDecoder.decode(value, "UTF-8")
         }.getOrDefault(value)
+    }
+
+    private fun encodeUrlPath(value: String): String {
+        return java.net.URLEncoder.encode(value, "UTF-8")
+            .replace("+", "%20")
     }
 }

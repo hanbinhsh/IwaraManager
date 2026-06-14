@@ -84,6 +84,7 @@ fun LibraryScreen(
     searchState: SearchUiState,
     selectedTab: MainTab,
     tabReselectTick: Long,
+    showRematchButtonInList: Boolean,
     onSelectTab: (MainTab) -> Unit,
     onOpenSettings: () -> Unit,
     onRescan: () -> Unit,
@@ -103,6 +104,7 @@ fun LibraryScreen(
     onRetryMatchTask: (MatchTaskEntity) -> Unit,
     onRetryFailedTasks: () -> Unit,
     onStartBatchMatch: () -> Unit,
+    onStartBatchRematch: () -> Unit,
     onOpenVideo: (VideoItem) -> Unit,
     onMatchVideo: (VideoItem) -> Unit,
     onPlayVideo: (VideoItem) -> Unit
@@ -207,7 +209,8 @@ fun LibraryScreen(
                 gridState = libraryGridState,
                 onOpenVideo = onOpenVideo,
                 onMatchVideo = onMatchVideo,
-                onPlayVideo = onPlayVideo
+                onPlayVideo = onPlayVideo,
+                showRematchButtonInList = showRematchButtonInList
             )
 
             MainTab.Filters -> FilterContent(
@@ -235,7 +238,8 @@ fun LibraryScreen(
                 onClearQuery = onClearQuery,
                 onOpenVideo = onOpenVideo,
                 onMatchVideo = onMatchVideo,
-                onPlayVideo = onPlayVideo
+                onPlayVideo = onPlayVideo,
+                showRematchButtonInList = showRematchButtonInList
             )
 
             MainTab.Tasks -> MatchTaskContent(
@@ -252,6 +256,7 @@ fun LibraryScreen(
                 onRetryTask = onRetryMatchTask,
                 onRetryFailedTasks = onRetryFailedTasks,
                 onStartBatchMatch = onStartBatchMatch,
+                onStartBatchRematch = onStartBatchRematch,
                 onMatchVideo = onMatchVideo
             )
         }
@@ -266,7 +271,8 @@ private fun LibraryContent(
     gridState: LazyGridState,
     onOpenVideo: (VideoItem) -> Unit,
     onMatchVideo: (VideoItem) -> Unit,
-    onPlayVideo: (VideoItem) -> Unit
+    onPlayVideo: (VideoItem) -> Unit,
+    showRematchButtonInList: Boolean
 ) {
     Column(modifier = modifier) {
         if (state.isScanning) {
@@ -295,7 +301,8 @@ private fun LibraryContent(
                 gridState = gridState,
                 onOpenVideo = onOpenVideo,
                 onMatchVideo = onMatchVideo,
-                onPlayVideo = onPlayVideo
+                onPlayVideo = onPlayVideo,
+                showRematchButtonInList = showRematchButtonInList
             )
         }
     }
@@ -312,7 +319,8 @@ private fun SearchContent(
     onClearQuery: () -> Unit,
     onOpenVideo: (VideoItem) -> Unit,
     onMatchVideo: (VideoItem) -> Unit,
-    onPlayVideo: (VideoItem) -> Unit
+    onPlayVideo: (VideoItem) -> Unit,
+    showRematchButtonInList: Boolean
 ) {
     Column(modifier = modifier) {
         SearchRow(searchState.query, onQueryChange, onClearQuery)
@@ -339,7 +347,8 @@ private fun SearchContent(
                 gridState = gridState,
                 onOpenVideo = onOpenVideo,
                 onMatchVideo = onMatchVideo,
-                onPlayVideo = onPlayVideo
+                onPlayVideo = onPlayVideo,
+                showRematchButtonInList = showRematchButtonInList
             )
         }
     }
@@ -384,7 +393,8 @@ private fun VideoShelfContent(
     gridState: LazyGridState,
     onOpenVideo: (VideoItem) -> Unit,
     onMatchVideo: (VideoItem) -> Unit,
-    onPlayVideo: (VideoItem) -> Unit
+    onPlayVideo: (VideoItem) -> Unit,
+    showRematchButtonInList: Boolean
 ) {
     when (layoutMode) {
         LibraryLayoutMode.List -> VideoListContent(
@@ -393,7 +403,8 @@ private fun VideoShelfContent(
             contentPadding = PaddingValues(bottom = 24.dp),
             onOpenVideo = onOpenVideo,
             onMatchVideo = onMatchVideo,
-            onPlayVideo = onPlayVideo
+            onPlayVideo = onPlayVideo,
+            showRematchButtonInList = showRematchButtonInList
         )
 
         LibraryLayoutMode.Grid -> VideoGridContent(
@@ -575,9 +586,11 @@ private fun MatchTaskContent(
     onRetryTask: (MatchTaskEntity) -> Unit,
     onRetryFailedTasks: () -> Unit,
     onStartBatchMatch: () -> Unit,
+    onStartBatchRematch: () -> Unit,
     onMatchVideo: (VideoItem) -> Unit
 ) {
     var showStartBatchDialog by remember { mutableStateOf(false) }
+    var showBatchRematchDialog by remember { mutableStateOf(false) }
     if (showStartBatchDialog) {
         AlertDialog(
             onDismissRequest = { showStartBatchDialog = false },
@@ -601,6 +614,29 @@ private fun MatchTaskContent(
             }
         )
     }
+    if (showBatchRematchDialog) {
+        AlertDialog(
+            onDismissRequest = { showBatchRematchDialog = false },
+            title = { Text("重新匹配全部已有 ID 的视频？") },
+            text = { Text("会优先按已绑定 Iwara ID，其次按文件名解析出的 ID 重新获取远程详情，用于补全头像、标签、统计等遗漏字段。") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showBatchRematchDialog = false
+                        onStartBatchRematch()
+                    },
+                    enabled = !state.isBatchMatching
+                ) {
+                    Text("开始")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showBatchRematchDialog = false }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
 
     LazyColumn(
         modifier = modifier,
@@ -614,8 +650,19 @@ private fun MatchTaskContent(
                 isBatchMatching = state.isBatchMatching,
                 onFilterChange = onFilterChange,
                 onRetryFailedTasks = onRetryFailedTasks,
-                onStartBatchMatch = { showStartBatchDialog = true }
+                onStartBatchMatch = { showStartBatchDialog = true },
+                onStartBatchRematch = { showBatchRematchDialog = true }
             )
+        }
+
+        if (state.error != null) {
+            item {
+                Text(
+                    text = state.error,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+            }
         }
 
         if (state.isBatchMatching) {
@@ -674,7 +721,8 @@ private fun TaskFilterRow(
     isBatchMatching: Boolean,
     onFilterChange: (MatchTaskFilter) -> Unit,
     onRetryFailedTasks: () -> Unit,
-    onStartBatchMatch: () -> Unit
+    onStartBatchMatch: () -> Unit,
+    onStartBatchRematch: () -> Unit
 ) {
     Column(
         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
@@ -708,6 +756,12 @@ private fun TaskFilterRow(
                 onClick = onRetryFailedTasks,
                 enabled = !isBatchMatching,
                 text = if (isBatchMatching) "重试中" else "重试失败"
+            )
+            CompactChip(
+                selected = false,
+                onClick = onStartBatchRematch,
+                enabled = !isBatchMatching,
+                text = if (isBatchMatching) "重匹配中" else "全部重匹配"
             )
         }
     }
