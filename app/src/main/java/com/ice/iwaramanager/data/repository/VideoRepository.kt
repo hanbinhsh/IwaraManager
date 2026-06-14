@@ -117,7 +117,7 @@ class VideoRepository(context: Context) {
         connectTimeoutSeconds: Int,
         readTimeoutSeconds: Int
     ): LibrarySource {
-        val fixedBaseUrl = baseUrl.trim().trimEnd('/')
+        val fixedBaseUrl = webDavClient.normalizeBaseUrl(baseUrl)
         val fixedRootPath = rootPath.trim().ifBlank { "/" }
         val now = System.currentTimeMillis()
         val id = "webdav:${UUID.randomUUID()}"
@@ -159,7 +159,7 @@ class VideoRepository(context: Context) {
             name = name.ifBlank { "WebDAV" },
             type = LibrarySourceType.WebDav,
             rootUriString = "test",
-            webDavBaseUrl = baseUrl.trim().trimEnd('/'),
+            webDavBaseUrl = webDavClient.normalizeBaseUrl(baseUrl),
             webDavRootPath = rootPath.trim().ifBlank { "/" },
             webDavUsername = username.trim().ifBlank { null },
             remoteIndexMode = indexMode,

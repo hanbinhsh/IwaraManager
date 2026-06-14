@@ -1,0 +1,36 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <!-- 背景 -->
+    <rect width="512" height="512" rx="100" fill="#171A21"/>
+
+    <!-- 主体：视频卡片 / 胶片 -->
+    <g transform="translate(256 256)">
+        <!-- 右侧轻微层次，模拟卡片厚度 -->
+        <rect x="-127" y="-112" width="272" height="224" rx="34" fill="#AFC0CE"/>
+
+        <!-- 主视频卡片 -->
+        <rect x="-150" y="-132" width="272" height="264" rx="38" fill="#C7D5E0"/>
+
+        <rect x="-114" y="-132" width="36" height="264" fill="#AFC0CE"/>
+
+        <!-- 左侧胶片孔 -->
+        <rect x="-110" y="-89" width="28" height="28" rx="8" fill="#171A21"/>
+        <rect x="-110" y="-39" width="28" height="28" rx="8" fill="#171A21"/>
+        <rect x="-110" y="11" width="28" height="28" rx="8" fill="#171A21"/>
+        <rect x="-110" y="61" width="28" height="28" rx="8" fill="#171A21"/>
+
+        <!-- I 字母主体 -->
+        <rect x="-55" y="-80" width="32" height="160" rx="16" fill="#171A21"/>
+
+        <!-- 播放符号：位置微调，确保与 I 字母垂直居中 -->
+        <g transform="translate(-28, 4)">
+            <path d="M28 -46
+                     C28 -58 41 -66 51 -59
+                     L106 -18
+                     C115 -11 115 3 106 10
+                     L51 51
+                     C41 58 28 51 28 39
+                     Z"
+                  fill="#171A21"/>
+        </g>
+    </g>
+</svg>

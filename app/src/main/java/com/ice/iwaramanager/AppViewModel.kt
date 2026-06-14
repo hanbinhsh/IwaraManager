@@ -714,12 +714,13 @@ class AppViewModel(
 
     fun testWebDavSource() {
         val form = _settingsState.value.webDavForm
+        val fixedBaseUrl = normalizeWebDavBaseUrl(form.baseUrl)
         viewModelScope.launch {
-            _settingsState.update { it.copy(message = null, error = null) }
+            _settingsState.update { it.copy(message = null, error = null, webDavForm = it.webDavForm.copy(baseUrl = fixedBaseUrl)) }
             runCatching {
                 videoRepository.testWebDavConnection(
                     name = form.name,
-                    baseUrl = form.baseUrl,
+                    baseUrl = fixedBaseUrl,
                     rootPath = form.rootPath,
                     username = form.username,
                     password = form.password,
@@ -737,12 +738,13 @@ class AppViewModel(
 
     fun addWebDavSource() {
         val form = _settingsState.value.webDavForm
+        val fixedBaseUrl = normalizeWebDavBaseUrl(form.baseUrl)
         viewModelScope.launch {
-            _settingsState.update { it.copy(message = null, error = null) }
+            _settingsState.update { it.copy(message = null, error = null, webDavForm = it.webDavForm.copy(baseUrl = fixedBaseUrl)) }
             runCatching {
                 val source = videoRepository.addWebDavSource(
                     name = form.name,
-                    baseUrl = form.baseUrl,
+                    baseUrl = fixedBaseUrl,
                     rootPath = form.rootPath,
                     username = form.username,
                     password = form.password,
@@ -1889,6 +1891,12 @@ class AppViewModel(
             .substringBefore("#")
             .trim()
         return raw.takeIf { it.matches(Regex("[A-Za-z0-9_-]{8,}")) }
+    }
+
+    private fun normalizeWebDavBaseUrl(value: String): String {
+        val trimmed = value.trim().trimEnd('/')
+        if (trimmed.isBlank() || trimmed.contains("://")) return trimmed
+        return "https://$trimmed"
     }
 
     private fun currentSourceIds(): List<String> {

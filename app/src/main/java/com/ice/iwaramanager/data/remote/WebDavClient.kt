@@ -2,14 +2,15 @@ package com.ice.iwaramanager.data.remote
 
 import android.util.Base64
 import com.ice.iwaramanager.data.model.LibrarySource
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.w3c.dom.Element
 import java.io.ByteArrayInputStream
-import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
 import java.net.URI
-import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 import javax.xml.parsers.DocumentBuilderFactory
 
 class WebDavClient {
@@ -20,8 +21,14 @@ class WebDavClient {
         return mapOf("Authorization" to "Basic $token")
     }
 
+    fun normalizeBaseUrl(value: String): String {
+        val trimmed = value.trim().trimEnd('/')
+        if (trimmed.isBlank()) return trimmed
+        return if (trimmed.contains("://")) trimmed else "https://$trimmed"
+    }
+
     fun validateSource(source: LibrarySource) {
-        val base = source.webDavBaseUrl?.trim().orEmpty()
+        val base = normalizeBaseUrl(source.webDavBaseUrl.orEmpty())
         require(base.isNotBlank()) { "WebDAV 服务器地址不能为空" }
         val uri = URI(base)
         require(uri.scheme.equals("https", ignoreCase = true)) { "第一版 WebDAV 仅允许 HTTPS，请检查服务器地址" }
@@ -41,7 +48,7 @@ class WebDavClient {
     }
 
     fun buildUrl(source: LibrarySource, path: String): String {
-        val base = source.webDavBaseUrl!!.trim().trimEnd('/')
+        val base = normalizeBaseUrl(source.webDavBaseUrl!!)
         val root = source.webDavRootPath.orEmpty().trim('/').takeIf { it.isNotBlank() }
         val rel = path.trim('/').takeIf { it.isNotBlank() }
         val combined = listOfNotNull(root, rel).joinToString("/")
@@ -49,30 +56,36 @@ class WebDavClient {
     }
 
     private fun propfind(url: String, source: LibrarySource, password: String?): List<WebDavEntry> {
-        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
-            requestMethod = "PROPFIND"
-            connectTimeout = source.connectTimeoutSeconds * 1000
-            readTimeout = source.readTimeoutSeconds * 1000
-            setRequestProperty("Depth", "1")
-            setRequestProperty("Accept", "application/xml,text/xml,*/*")
-            setRequestProperty("User-Agent", "IwaraManager/1.0")
-            authHeaders(source, password).forEach { (key, value) -> setRequestProperty(key, value) }
-        }
+        val client = OkHttpClient.Builder()
+            .connectTimeout(source.connectTimeoutSeconds.toLong(), TimeUnit.SECONDS)
+            .readTimeout(source.readTimeoutSeconds.toLong(), TimeUnit.SECONDS)
+            .callTimeout((source.connectTimeoutSeconds + source.readTimeoutSeconds).toLong(), TimeUnit.SECONDS)
+            .build()
+        val requestBuilder = Request.Builder()
+            .url(url)
+            .method("PROPFIND", null)
+            .header("Depth", "1")
+            .header("Accept", "application/xml,text/xml,*/*")
+            .header("User-Agent", "IwaraManager/1.0")
+        authHeaders(source, password).forEach { (key, value) -> requestBuilder.header(key, value) }
+
         try {
-            val code = connection.responseCode
-            if (code == HttpURLConnection.HTTP_UNAUTHORIZED || code == HttpURLConnection.HTTP_FORBIDDEN) {
-                error("WebDAV 认证失败或无权限（HTTP $code）")
+            client.newCall(requestBuilder.build()).execute().use { response ->
+                val code = response.code
+                if (code == 401 || code == 403) {
+                    error("WebDAV 认证失败或无权限（HTTP $code ${response.message}）")
+                }
+                if (code == 404) error("WebDAV 路径不存在（HTTP 404）")
+                if (code !in 200..299) error("WebDAV PROPFIND 失败（HTTP $code ${response.message}）")
+                val bytes = response.body?.bytes() ?: error("WebDAV PROPFIND 成功但响应体为空")
+                return parseMultistatus(bytes, url)
             }
-            if (code == HttpURLConnection.HTTP_NOT_FOUND) error("WebDAV 路径不存在（HTTP 404）")
-            if (code !in 200..299) error("WebDAV PROPFIND 失败（HTTP $code）")
-            val bytes = connection.inputStream.use { it.readBytes() }
-            return parseMultistatus(bytes, url)
         } catch (e: SocketTimeoutException) {
             error("WebDAV 连接或读取超时：${e.message ?: "timeout"}")
         } catch (e: javax.net.ssl.SSLException) {
             error("WebDAV HTTPS/证书错误：${e.message ?: e::class.java.simpleName}")
-        } finally {
-            connection.disconnect()
+        } catch (e: IllegalArgumentException) {
+            error("WebDAV 地址无效：${e.message ?: e::class.java.simpleName}")
         }
     }
 
