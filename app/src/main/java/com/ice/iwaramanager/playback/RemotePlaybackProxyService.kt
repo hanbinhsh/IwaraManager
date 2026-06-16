@@ -14,15 +14,20 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.ice.iwaramanager.MainActivity
 import com.ice.iwaramanager.R
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
-import java.net.HttpURLConnection
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
-import java.net.URL
+import java.security.SecureRandom
+import java.security.cert.X509Certificate
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLContext
+import javax.net.ssl.X509TrustManager
 import kotlin.concurrent.thread
 
 class RemotePlaybackProxyService : Service() {
@@ -48,10 +53,10 @@ class RemotePlaybackProxyService : Service() {
         val manager = getSystemService(NotificationManager::class.java)
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "远程视频播放",
+            "远程视频代理",
             NotificationManager.IMPORTANCE_LOW
         ).apply {
-            description = "为外部播放器提供临时网络视频代理"
+            description = "为应用内和外部播放器提供临时网络视频代理"
         }
         manager.createNotificationChannel(channel)
     }
@@ -66,7 +71,7 @@ class RemotePlaybackProxyService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle("Iwara Manager 正在代理远程视频")
-            .setContentText("外部播放器播放 WebDAV 视频时需要保持此服务运行")
+            .setContentText("播放或完整索引 WebDAV 视频时需要保持此服务运行")
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .build()
@@ -84,18 +89,19 @@ class RemotePlaybackProxyService : Service() {
             headers: Map<String, String>,
             mimeType: String,
             readTimeoutSeconds: Int,
-            idleTimeoutSeconds: Int
+            idleTimeoutSeconds: Int,
+            allowInsecureTls: Boolean = false
         ): Uri {
             val running = ensureServer(readTimeoutSeconds, idleTimeoutSeconds)
             val token = UUID.randomUUID().toString()
-            requests[token] = ProxyRequest(remoteUrl, headers, mimeType, readTimeoutSeconds * 1000)
+            requests[token] = ProxyRequest(remoteUrl, headers, mimeType, readTimeoutSeconds * 1000, allowInsecureTls)
             val intent = Intent(context, RemotePlaybackProxyService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {
                 context.startService(intent)
             }
-            return Uri.parse("http://127.0.0.1:${running.port}/play/$token")
+            return Uri.parse("http://localhost:${running.port}/play/$token")
         }
 
         private fun ensureServer(readTimeoutSeconds: Int, idleTimeoutSeconds: Int): ProxyServer {
@@ -119,7 +125,8 @@ data class ProxyRequest(
     val remoteUrl: String,
     val headers: Map<String, String>,
     val mimeType: String,
-    val readTimeoutMillis: Int
+    val readTimeoutMillis: Int,
+    val allowInsecureTls: Boolean
 )
 
 private class ProxyServer(
@@ -140,7 +147,10 @@ private class ProxyServer(
                 try {
                     val socket = serverSocket.accept()
                     lastAccess = System.currentTimeMillis()
-                    thread(name = "iwara-remote-proxy-client", isDaemon = true) { handle(socket) }
+                    thread(name = "iwara-remote-proxy-client", isDaemon = true) {
+                        runCatching { handle(socket) }
+                        runCatching { socket.close() }
+                    }
                 } catch (_: Exception) {
                     isRunning = false
                 }
@@ -172,7 +182,7 @@ private class ProxyServer(
             val token = path.substringAfter("/play/", "").substringBefore('?')
             val request = requests[token]
             if (request == null) {
-                writeSimple(output, 404, "text/plain", "代理请求已失效")
+                safeWriteSimple(output, 404, "text/plain", "代理请求已失效")
                 return
             }
             proxyRemote(request, headers["range"], output)
@@ -180,37 +190,54 @@ private class ProxyServer(
     }
 
     private fun proxyRemote(request: ProxyRequest, range: String?, output: BufferedOutputStream) {
-        val connection = (URL(request.remoteUrl).openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 15_000
-            readTimeout = request.readTimeoutMillis.takeIf { it > 0 } ?: readTimeoutMillis
-            setRequestProperty("User-Agent", "IwaraManager/1.0")
-            setRequestProperty("Accept", "*/*")
-            if (!range.isNullOrBlank()) setRequestProperty("Range", range)
-            request.headers.forEach { (key, value) -> setRequestProperty(key, value) }
-        }
+        val client = buildClient(request)
+        val requestBuilder = Request.Builder()
+            .url(request.remoteUrl)
+            .get()
+            .header("User-Agent", "IwaraManager/1.0")
+            .header("Accept", "*/*")
+        if (!range.isNullOrBlank()) requestBuilder.header("Range", range)
+        request.headers.forEach { (key, value) -> requestBuilder.header(key, value) }
         try {
-            val code = connection.responseCode
-            val stream = runCatching { connection.inputStream }.getOrElse { connection.errorStream }
-            if (stream == null) {
-                writeSimple(output, code, "text/plain", "远程服务器没有返回数据（HTTP $code）")
-                return
+            client.newCall(requestBuilder.build()).execute().use { response ->
+                val code = response.code
+                val body = response.body
+                if (body == null) {
+                    safeWriteSimple(output, code, "text/plain", "远程服务器没有返回数据（HTTP $code）")
+                    return
+                }
+                val statusText = if (code == 206) "Partial Content" else response.message.ifBlank { "OK" }
+                output.write("HTTP/1.1 $code $statusText\r\n".toByteArray())
+                val contentType = response.header("Content-Type") ?: request.mimeType
+                output.write("Content-Type: $contentType\r\n".toByteArray())
+                response.header("Content-Length")?.let { output.write("Content-Length: $it\r\n".toByteArray()) }
+                response.header("Content-Range")?.let { output.write("Content-Range: $it\r\n".toByteArray()) }
+                output.write("Accept-Ranges: bytes\r\n".toByteArray())
+                output.write("Connection: close\r\n\r\n".toByteArray())
+                body.byteStream().use { it.copyTo(output) }
+                output.flush()
             }
-            val statusText = if (code == HttpURLConnection.HTTP_PARTIAL) "Partial Content" else "OK"
-            output.write("HTTP/1.1 $code $statusText\r\n".toByteArray())
-            val contentType = connection.contentType ?: request.mimeType
-            output.write("Content-Type: $contentType\r\n".toByteArray())
-            connection.getHeaderField("Content-Length")?.let { output.write("Content-Length: $it\r\n".toByteArray()) }
-            connection.getHeaderField("Content-Range")?.let { output.write("Content-Range: $it\r\n".toByteArray()) }
-            output.write("Accept-Ranges: bytes\r\n".toByteArray())
-            output.write("Connection: close\r\n\r\n".toByteArray())
-            stream.use { it.copyTo(output) }
-            output.flush()
         } catch (e: Exception) {
-            writeSimple(output, 502, "text/plain", "远程播放代理错误：${e.message ?: e::class.java.simpleName}")
-        } finally {
-            connection.disconnect()
+            safeWriteSimple(output, 502, "text/plain", "远程播放代理错误：${e.message ?: e::class.java.simpleName}")
         }
+    }
+
+    private fun buildClient(request: ProxyRequest): OkHttpClient {
+        val builder = OkHttpClient.Builder()
+            .connectTimeout(request.readTimeoutMillis.toLong(), TimeUnit.MILLISECONDS)
+            .readTimeout(request.readTimeoutMillis.toLong(), TimeUnit.MILLISECONDS)
+        if (request.allowInsecureTls) {
+            val trustManager = object : X509TrustManager {
+                override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) = Unit
+                override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) = Unit
+                override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+            }
+            val sslContext = SSLContext.getInstance("TLS")
+            sslContext.init(null, arrayOf(trustManager), SecureRandom())
+            builder.sslSocketFactory(sslContext.socketFactory, trustManager)
+            builder.hostnameVerifier { _, _ -> true }
+        }
+        return builder.build()
     }
 
     private fun writeSimple(output: BufferedOutputStream, code: Int, contentType: String, body: String) {
@@ -221,6 +248,10 @@ private class ProxyServer(
         output.write("Connection: close\r\n\r\n".toByteArray())
         output.write(bytes)
         output.flush()
+    }
+
+    private fun safeWriteSimple(output: BufferedOutputStream, code: Int, contentType: String, body: String) {
+        runCatching { writeSimple(output, code, contentType, body) }
     }
 
     private fun readLine(input: BufferedInputStream): String? {

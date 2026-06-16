@@ -10,13 +10,18 @@ import java.net.SocketTimeoutException
 import java.net.URI
 import java.text.SimpleDateFormat
 import java.util.Locale
+import java.security.SecureRandom
+import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLHandshakeException
+import javax.net.ssl.X509TrustManager
 import javax.xml.parsers.DocumentBuilderFactory
 
 class WebDavClient {
     fun authHeaders(source: LibrarySource, password: String?): Map<String, String> {
         val username = source.webDavUsername?.trim().orEmpty()
-        if (username.isBlank() || password.isNullOrBlank()) return emptyMap()
+        if (password.isNullOrBlank()) return emptyMap()
         val token = Base64.encodeToString("$username:$password".toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
         return mapOf("Authorization" to "Basic $token")
     }
@@ -37,7 +42,7 @@ class WebDavClient {
 
     fun testConnection(source: LibrarySource, password: String?): String {
         validateSource(source)
-        val url = buildUrl(source, source.webDavRootPath.orEmpty())
+        val url = buildUrl(source, "")
         val entries = propfind(url, source, password)
         return "连接成功，当前目录 ${entries.size} 个条目"
     }
@@ -45,6 +50,11 @@ class WebDavClient {
     fun list(source: LibrarySource, password: String?, path: String): List<WebDavEntry> {
         validateSource(source)
         return propfind(buildUrl(source, path), source, password)
+    }
+
+    fun listUrl(source: LibrarySource, password: String?, url: String): List<WebDavEntry> {
+        validateSource(source)
+        return propfind(url, source, password)
     }
 
     fun buildUrl(source: LibrarySource, path: String): String {
@@ -56,11 +66,7 @@ class WebDavClient {
     }
 
     private fun propfind(url: String, source: LibrarySource, password: String?): List<WebDavEntry> {
-        val client = OkHttpClient.Builder()
-            .connectTimeout(source.connectTimeoutSeconds.toLong(), TimeUnit.SECONDS)
-            .readTimeout(source.readTimeoutSeconds.toLong(), TimeUnit.SECONDS)
-            .callTimeout((source.connectTimeoutSeconds + source.readTimeoutSeconds).toLong(), TimeUnit.SECONDS)
-            .build()
+        val client = buildClient(source)
         val requestBuilder = Request.Builder()
             .url(url)
             .method("PROPFIND", null)
@@ -75,18 +81,68 @@ class WebDavClient {
                 if (code == 401 || code == 403) {
                     error("WebDAV 认证失败或无权限（HTTP $code ${response.message}）")
                 }
-                if (code == 404) error("WebDAV 路径不存在（HTTP 404）")
-                if (code !in 200..299) error("WebDAV PROPFIND 失败（HTTP $code ${response.message}）")
+                if (code == 404) error(webDavHttpErrorMessage(source, url, code, response.message, response.body?.string()))
+                if (code !in 200..299) error(webDavHttpErrorMessage(source, url, code, response.message, response.body?.string()))
                 val bytes = response.body?.bytes() ?: error("WebDAV PROPFIND 成功但响应体为空")
                 return parseMultistatus(bytes, url)
             }
         } catch (e: SocketTimeoutException) {
             error("WebDAV 连接或读取超时：${e.message ?: "timeout"}")
+        } catch (e: SSLHandshakeException) {
+            error("WebDAV HTTPS/证书错误：${e.message ?: e::class.java.simpleName}。如果这是路由器或 NAS 的自签证书，请在添加网络盘时开启“允许不受信任证书”。")
         } catch (e: javax.net.ssl.SSLException) {
-            error("WebDAV HTTPS/证书错误：${e.message ?: e::class.java.simpleName}")
+            error("WebDAV HTTPS/证书错误：${e.message ?: e::class.java.simpleName}。如果这是路由器或 NAS 的自签证书，请在添加网络盘时开启“允许不受信任证书”。")
         } catch (e: IllegalArgumentException) {
             error("WebDAV 地址无效：${e.message ?: e::class.java.simpleName}")
         }
+    }
+
+    private fun webDavHttpErrorMessage(
+        source: LibrarySource,
+        url: String,
+        code: Int,
+        message: String,
+        body: String?
+    ): String {
+        val root = source.webDavRootPath.orEmpty().ifBlank { "/" }
+        val bodyPreview = body
+            ?.replace(Regex("\\s+"), " ")
+            ?.trim()
+            ?.take(300)
+            ?.takeIf { it.isNotBlank() }
+        return buildString {
+            if (code == 404) {
+                append("WebDAV 路径不存在（HTTP 404）")
+            } else {
+                append("WebDAV PROPFIND 失败（HTTP $code")
+                if (message.isNotBlank()) append(" $message")
+                append("）")
+            }
+            append("\n请求URL：").append(url)
+            append("\n服务器地址：").append(source.webDavBaseUrl.orEmpty())
+            append("\n根路径：").append(root)
+            append("\n请确认这个地址本身就是 WebDAV 入口，或把根路径改成服务实际路径，例如 /dav、/webdav、/remote.php/dav/files/用户名。")
+            bodyPreview?.let { append("\n响应片段：").append(it) }
+        }
+    }
+
+    private fun buildClient(source: LibrarySource): OkHttpClient {
+        val builder = OkHttpClient.Builder()
+            .connectTimeout(source.connectTimeoutSeconds.toLong(), TimeUnit.SECONDS)
+            .readTimeout(source.readTimeoutSeconds.toLong(), TimeUnit.SECONDS)
+            .callTimeout((source.connectTimeoutSeconds + source.readTimeoutSeconds).toLong(), TimeUnit.SECONDS)
+        if (source.webDavAllowInsecureTls) {
+            val trustManager = object : X509TrustManager {
+                override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) = Unit
+                override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) = Unit
+                override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+            }
+            val sslContext = SSLContext.getInstance("TLS")
+            sslContext.init(null, arrayOf(trustManager), SecureRandom())
+            builder.sslSocketFactory(sslContext.socketFactory, trustManager)
+            builder.hostnameVerifier { _, _ -> true }
+        }
+        return builder.build()
     }
 
     private fun parseMultistatus(bytes: ByteArray, requestUrl: String): List<WebDavEntry> {

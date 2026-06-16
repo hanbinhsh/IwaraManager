@@ -28,7 +28,7 @@ import com.ice.iwaramanager.data.local.entity.VideoTagEntity
         LibrarySourceEntity::class,
         LibraryFolderEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -48,7 +48,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "iwara_manager.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                     .build()
                     .also { INSTANCE = it }
             }
@@ -117,14 +117,20 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_video_sourceId ON video(sourceId)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_video_sourceId_parentPath ON video(sourceId, parentPath)")
 
-                db.execSQL("CREATE TABLE IF NOT EXISTS library_source (id TEXT NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL, rootUriString TEXT NOT NULL, webDavBaseUrl TEXT, webDavRootPath TEXT, webDavUsername TEXT, remoteIndexMode TEXT NOT NULL, connectTimeoutSeconds INTEGER NOT NULL, readTimeoutSeconds INTEGER NOT NULL, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(id))")
+                db.execSQL("CREATE TABLE IF NOT EXISTS library_source (id TEXT NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL, rootUriString TEXT NOT NULL, webDavBaseUrl TEXT, webDavRootPath TEXT, webDavUsername TEXT, webDavAllowInsecureTls INTEGER NOT NULL DEFAULT 0, remoteIndexMode TEXT NOT NULL, connectTimeoutSeconds INTEGER NOT NULL, readTimeoutSeconds INTEGER NOT NULL, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(id))")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_library_source_type ON library_source(type)")
                 db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_library_source_rootUriString ON library_source(rootUriString)")
-                db.execSQL("INSERT OR IGNORE INTO library_source(id, name, type, rootUriString, webDavBaseUrl, webDavRootPath, webDavUsername, remoteIndexMode, connectTimeoutSeconds, readTimeoutSeconds, createdAt, updatedAt) SELECT libraryRootUriString, '本地目录', 'LocalSaf', libraryRootUriString, NULL, NULL, NULL, 'Full', 15, 30, MIN(createdAt), MAX(updatedAt) FROM video GROUP BY libraryRootUriString")
+                db.execSQL("INSERT OR IGNORE INTO library_source(id, name, type, rootUriString, webDavBaseUrl, webDavRootPath, webDavUsername, webDavAllowInsecureTls, remoteIndexMode, connectTimeoutSeconds, readTimeoutSeconds, createdAt, updatedAt) SELECT libraryRootUriString, '本地目录', 'LocalSaf', libraryRootUriString, NULL, NULL, NULL, 0, 'Full', 15, 30, MIN(createdAt), MAX(updatedAt) FROM video GROUP BY libraryRootUriString")
 
                 db.execSQL("CREATE TABLE IF NOT EXISTS library_folder (sourceId TEXT NOT NULL, sourceName TEXT NOT NULL, path TEXT NOT NULL, parentPath TEXT, name TEXT NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(sourceId, path))")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_library_folder_sourceId ON library_folder(sourceId)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_library_folder_sourceId_parentPath ON library_folder(sourceId, parentPath)")
+            }
+        }
+
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE library_source ADD COLUMN webDavAllowInsecureTls INTEGER NOT NULL DEFAULT 0")
             }
         }
     }

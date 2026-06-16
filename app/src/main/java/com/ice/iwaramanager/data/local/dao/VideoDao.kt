@@ -337,6 +337,12 @@ interface VideoDao {
     @Query("DELETE FROM video WHERE sourceId = :sourceId AND uriString NOT IN (:existingUris)")
     suspend fun deleteMissingBySource(sourceId: String, existingUris: List<String>)
 
+    @Query("DELETE FROM video WHERE uriString IN (:uris)")
+    suspend fun deleteByUris(uris: List<String>)
+
+    @Query("UPDATE video SET coverFilePath = REPLACE(coverFilePath, :oldPrefix, :newPrefix) WHERE coverFilePath LIKE :oldLike")
+    suspend fun updateCoverDir(oldPrefix: String, newPrefix: String, oldLike: String)
+
     @Query("DELETE FROM video")
     suspend fun clearAll()
 }

@@ -63,6 +63,8 @@ data class SettingsUiState(
     val folderUriString: String? = null,
     val librarySources: List<LibrarySource> = emptyList(),
     val webDavForm: WebDavSourceForm = WebDavSourceForm(),
+    val webDavMessage: String? = null,
+    val webDavError: String? = null,
     val remoteProxyIdleTimeoutSecondsText: String = "300",
     val remoteProxyIdleTimeoutSeconds: Int = 300,
     val remoteProxyReadTimeoutSecondsText: String = "60",

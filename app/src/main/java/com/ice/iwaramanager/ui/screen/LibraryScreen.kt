@@ -61,6 +61,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -119,6 +120,7 @@ fun LibraryScreen(
 ) {
     val libraryListState = rememberLazyListState()
     val libraryGridState = rememberLazyGridState()
+    val directoryListState = rememberLazyListState()
     val filterListState = rememberLazyListState()
     val searchListState = rememberLazyListState()
     val searchGridState = rememberLazyGridState()
@@ -129,6 +131,8 @@ fun LibraryScreen(
             MainTab.Library -> {
                 if (libraryState.layoutMode == LibraryLayoutMode.Grid) {
                     libraryGridState.scrollToItem(0)
+                } else if (libraryState.layoutMode == LibraryLayoutMode.Directory) {
+                    directoryListState.scrollToItem(0)
                 } else {
                     libraryListState.scrollToItem(0)
                 }
@@ -151,14 +155,37 @@ fun LibraryScreen(
         if (tabReselectTick > 0L) scrollCurrentTabToTop()
     }
 
+    // 仅在进入“另一个目录”时把文件夹列表滚回顶部；从详情页返回（重新进入组合）时
+    // 目录未变，则保留之前的滚动位置。用 rememberSaveable 记住上次所在目录，跨返回仍有效。
+    val currentDirectoryKey = "${libraryState.currentDirectorySourceId}:${libraryState.currentDirectoryPath}"
+    var lastDirectoryKey by rememberSaveable { mutableStateOf(currentDirectoryKey) }
+    LaunchedEffect(libraryState.layoutMode, currentDirectoryKey) {
+        if (libraryState.layoutMode == LibraryLayoutMode.Directory && currentDirectoryKey != lastDirectoryKey) {
+            directoryListState.scrollToItem(0)
+        }
+        lastDirectoryKey = currentDirectoryKey
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
-                    SourceScopeDropdown(
-                        state = libraryState,
-                        onSourceScopeChange = onSourceScopeChange
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "Iwara Manager",
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        SourceScopeDropdown(
+                            state = libraryState,
+                            onSourceScopeChange = onSourceScopeChange,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
                 },
                 actions = {
                     IconButton(
@@ -219,6 +246,7 @@ fun LibraryScreen(
                     .padding(paddingValues),
                 state = libraryState,
                 listState = libraryListState,
+                directoryListState = directoryListState,
                 gridState = libraryGridState,
                 onOpenVideo = onOpenVideo,
                 onMatchVideo = onMatchVideo,
@@ -282,14 +310,15 @@ fun LibraryScreen(
 @Composable
 private fun SourceScopeDropdown(
     state: LibraryUiState,
-    onSourceScopeChange: (String) -> Unit
+    onSourceScopeChange: (String) -> Unit,
+    modifier: Modifier = Modifier
 ) {
     var expanded by remember { mutableStateOf(false) }
     val current = state.sourceScopes.firstOrNull { it.key == state.selectedSourceScopeKey }
-    Box {
+    Box(modifier = modifier) {
         TextButton(onClick = { expanded = true }) {
             Text(
-                text = current?.label ?: "Iwara Manager",
+                text = current?.label ?: "全部",
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
@@ -317,6 +346,7 @@ private fun LibraryContent(
     modifier: Modifier,
     state: LibraryUiState,
     listState: LazyListState,
+    directoryListState: LazyListState,
     gridState: LazyGridState,
     onOpenVideo: (VideoItem) -> Unit,
     onMatchVideo: (VideoItem) -> Unit,
@@ -344,7 +374,7 @@ private fun LibraryContent(
         if (state.layoutMode == LibraryLayoutMode.Directory) {
             DirectoryContent(
                 state = state,
-                listState = listState,
+                listState = directoryListState,
                 onOpenDirectory = onOpenDirectory,
                 onDirectoryUp = onDirectoryUp,
                 onOpenVideo = onOpenVideo,
@@ -382,31 +412,30 @@ private fun DirectoryContent(
     onPlayVideo: (VideoItem) -> Unit,
     showRematchButtonInList: Boolean
 ) {
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        state = listState,
-        contentPadding = PaddingValues(bottom = 24.dp)
-    ) {
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
+    Column(modifier = Modifier.fillMaxSize()) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(
+                onClick = onDirectoryUp,
+                enabled = canNavigateDirectoryUp(state)
             ) {
-                IconButton(
-                    onClick = onDirectoryUp,
-                    enabled = state.currentDirectorySourceId != null && state.currentDirectoryPath.isNotBlank()
-                ) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "上一级")
-                }
-                Text(
-                    text = directoryTitle(state),
-                    style = MaterialTheme.typography.titleSmall,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "上一级")
             }
+            Text(
+                text = directoryTitle(state),
+                style = MaterialTheme.typography.titleSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         }
+        LazyColumn(
+            modifier = Modifier.fillMaxWidth().weight(1f),
+            state = listState,
+            contentPadding = PaddingValues(bottom = 24.dp)
+    ) {
         items(state.directoryFolders, key = { "folder:${it.sourceId}:${it.path}" }) { folder ->
             ListItem(
                 leadingContent = { Icon(Icons.Filled.FolderOpen, contentDescription = null) },
@@ -426,6 +455,7 @@ private fun DirectoryContent(
         if (state.directoryFolders.isEmpty() && state.directoryVideos.isEmpty()) {
             item { EmptyTaskText("当前目录没有视频。") }
         }
+    }
     }
 }
 
@@ -471,6 +501,13 @@ private fun directoryTitle(state: LibraryUiState): String {
         path.isBlank() -> source
         else -> "$source / $path"
     }
+}
+
+private fun canNavigateDirectoryUp(state: LibraryUiState): Boolean {
+    val sourceId = state.currentDirectorySourceId ?: return false
+    if (state.currentDirectoryPath.isNotBlank()) return true
+    val selectedScope = state.sourceScopes.firstOrNull { it.key == state.selectedSourceScopeKey }
+    return selectedScope?.sourceIds?.size != 1 || selectedScope.sourceIds.singleOrNull() != sourceId
 }
 
 @Composable

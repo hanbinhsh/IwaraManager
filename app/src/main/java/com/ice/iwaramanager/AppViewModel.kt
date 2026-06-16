@@ -23,8 +23,10 @@ import com.ice.iwaramanager.data.model.MatchTaskFilter
 import com.ice.iwaramanager.data.model.MatchTaskStatus
 import com.ice.iwaramanager.data.model.VideoItem
 import com.ice.iwaramanager.data.model.VideoOpenMode
+import com.ice.iwaramanager.data.model.WebDavSourceForm
 import com.ice.iwaramanager.data.repository.IwaraMetadataRepository
 import com.ice.iwaramanager.data.repository.VideoRepository
+import com.ice.iwaramanager.playback.RemotePlaybackProxyService
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -262,6 +264,7 @@ class AppViewModel(
     init {
         recoverInterruptedMatchTasks()
         viewModelScope.launch {
+            runCatching { videoRepository.migrateCoversToPersistentDir() }
             videoRepository.ensureLegacyLocalSource(initialFolderUriString)
             observeSources()
         }
@@ -402,12 +405,34 @@ class AppViewModel(
         } else {
             null
         }
+        var playbackDiagnostic = diagnostic
+        val playbackUri = if (source?.type == LibrarySourceType.WebDav) {
+            runCatching {
+                RemotePlaybackProxyService.createProxyUri(
+                    context = app,
+                    remoteUrl = video.uriString,
+                    headers = headers,
+                    mimeType = videoMimeType(video),
+                    readTimeoutSeconds = _settingsState.value.remoteProxyReadTimeoutSeconds,
+                    idleTimeoutSeconds = _settingsState.value.remoteProxyIdleTimeoutSeconds,
+                    allowInsecureTls = source.webDavAllowInsecureTls
+                ).toString()
+            }.getOrElse { error ->
+                playbackDiagnostic = RemotePlaybackDiagnostic(
+                    message = "启动 WebDAV 本地代理失败：${error.message ?: error::class.java.simpleName}",
+                    detail = "远程地址：${video.uriString}"
+                )
+                video.uriString
+            }
+        } else {
+            video.uriString
+        }
         _playerState.update {
             it.copy(
                 video = video,
-                playbackUriString = video.uriString,
-                requestHeaders = headers,
-                diagnostic = diagnostic
+                playbackUriString = playbackUri,
+                requestHeaders = if (playbackUri == video.uriString) headers else emptyMap(),
+                diagnostic = playbackDiagnostic
             )
         }
     }
@@ -656,6 +681,44 @@ class AppViewModel(
         _settingsState.update { it.copy(autoMatchSkipNoId = enabled) }
     }
 
+    fun prepareNewWebDavSource() {
+        _settingsState.update {
+            it.copy(
+                webDavForm = WebDavSourceForm(),
+                webDavMessage = null,
+                webDavError = null
+            )
+        }
+    }
+
+    fun editWebDavSource(sourceId: String) {
+        val source = _settingsState.value.librarySources.firstOrNull { it.id == sourceId && it.type == LibrarySourceType.WebDav }
+        if (source == null) {
+            _settingsState.update { it.copy(webDavMessage = null, webDavError = "WebDAV 来源不存在") }
+            return
+        }
+        _settingsState.update {
+            it.copy(
+                webDavForm = WebDavSourceForm(
+                    editingSourceId = source.id,
+                    name = source.name,
+                    baseUrl = source.webDavBaseUrl.orEmpty(),
+                    rootPath = source.webDavRootPath.orEmpty().ifBlank { "/" },
+                    username = source.webDavUsername.orEmpty(),
+                    password = "",
+                    allowInsecureTls = source.webDavAllowInsecureTls,
+                    indexMode = source.remoteIndexMode,
+                    connectTimeoutSecondsText = source.connectTimeoutSeconds.toString(),
+                    connectTimeoutSeconds = source.connectTimeoutSeconds,
+                    readTimeoutSecondsText = source.readTimeoutSeconds.toString(),
+                    readTimeoutSeconds = source.readTimeoutSeconds
+                ),
+                webDavMessage = null,
+                webDavError = null
+            )
+        }
+    }
+
     fun updateWebDavName(value: String) {
         _settingsState.update { it.copy(webDavForm = it.webDavForm.copy(name = value)) }
     }
@@ -674,6 +737,10 @@ class AppViewModel(
 
     fun updateWebDavPassword(value: String) {
         _settingsState.update { it.copy(webDavForm = it.webDavForm.copy(password = value)) }
+    }
+
+    fun setWebDavAllowInsecureTls(enabled: Boolean) {
+        _settingsState.update { it.copy(webDavForm = it.webDavForm.copy(allowInsecureTls = enabled)) }
     }
 
     fun setWebDavIndexMode(mode: RemoteIndexMode) {
@@ -715,23 +782,25 @@ class AppViewModel(
     fun testWebDavSource() {
         val form = _settingsState.value.webDavForm
         val fixedBaseUrl = normalizeWebDavBaseUrl(form.baseUrl)
+        val password = effectiveWebDavPassword(form)
         viewModelScope.launch {
-            _settingsState.update { it.copy(message = null, error = null, webDavForm = it.webDavForm.copy(baseUrl = fixedBaseUrl)) }
+            _settingsState.update { it.copy(webDavMessage = null, webDavError = null, webDavForm = it.webDavForm.copy(baseUrl = fixedBaseUrl)) }
             runCatching {
                 videoRepository.testWebDavConnection(
                     name = form.name,
                     baseUrl = fixedBaseUrl,
                     rootPath = form.rootPath,
                     username = form.username,
-                    password = form.password,
+                    password = password,
+                    allowInsecureTls = form.allowInsecureTls,
                     indexMode = form.indexMode,
                     connectTimeoutSeconds = form.connectTimeoutSeconds,
                     readTimeoutSeconds = form.readTimeoutSeconds
                 )
             }.onSuccess { message ->
-                _settingsState.update { it.copy(message = message, error = null) }
+                _settingsState.update { it.copy(webDavMessage = message, webDavError = null) }
             }.onFailure { error ->
-                _settingsState.update { it.copy(error = error.message ?: "WebDAV 连接失败") }
+                _settingsState.update { it.copy(webDavMessage = null, webDavError = error.message ?: "WebDAV 连接失败") }
             }
         }
     }
@@ -740,40 +809,64 @@ class AppViewModel(
         val form = _settingsState.value.webDavForm
         val fixedBaseUrl = normalizeWebDavBaseUrl(form.baseUrl)
         viewModelScope.launch {
-            _settingsState.update { it.copy(message = null, error = null, webDavForm = it.webDavForm.copy(baseUrl = fixedBaseUrl)) }
+            _settingsState.update { it.copy(webDavMessage = null, webDavError = null, webDavForm = it.webDavForm.copy(baseUrl = fixedBaseUrl)) }
             runCatching {
-                val source = videoRepository.addWebDavSource(
-                    name = form.name,
-                    baseUrl = fixedBaseUrl,
-                    rootPath = form.rootPath,
-                    username = form.username,
-                    password = form.password,
-                    indexMode = form.indexMode,
-                    connectTimeoutSeconds = form.connectTimeoutSeconds,
-                    readTimeoutSeconds = form.readTimeoutSeconds
-                )
-                prefs.edit().putString(KEY_SELECTED_SOURCE_SCOPE, sourceScopeKey(source.id)).apply()
-                _libraryState.update {
-                    it.copy(
-                        selectedSourceScopeKey = sourceScopeKey(source.id),
-                        currentDirectorySourceId = source.id,
-                        currentDirectoryPath = ""
+                val editingSourceId = form.editingSourceId
+                if (editingSourceId == null) {
+                    val source = videoRepository.addWebDavSource(
+                        name = form.name,
+                        baseUrl = fixedBaseUrl,
+                        rootPath = form.rootPath,
+                        username = form.username,
+                        password = form.password,
+                        allowInsecureTls = form.allowInsecureTls,
+                        indexMode = form.indexMode,
+                        connectTimeoutSeconds = form.connectTimeoutSeconds,
+                        readTimeoutSeconds = form.readTimeoutSeconds
                     )
+                    prefs.edit().putString(KEY_SELECTED_SOURCE_SCOPE, sourceScopeKey(source.id)).apply()
+                    _libraryState.update {
+                        it.copy(
+                            selectedSourceScopeKey = sourceScopeKey(source.id),
+                            currentDirectorySourceId = source.id,
+                            currentDirectoryPath = ""
+                        )
+                    }
+                    scanSource(source.id)
+                    source to false
+                } else {
+                    val source = videoRepository.updateWebDavSource(
+                        sourceId = editingSourceId,
+                        name = form.name,
+                        baseUrl = fixedBaseUrl,
+                        rootPath = form.rootPath,
+                        username = form.username,
+                        password = form.password,
+                        allowInsecureTls = form.allowInsecureTls,
+                        indexMode = form.indexMode,
+                        connectTimeoutSeconds = form.connectTimeoutSeconds,
+                        readTimeoutSeconds = form.readTimeoutSeconds
+                    )
+                    source to true
                 }
-                scanSource(source.id)
-                source
-            }.onSuccess { source ->
+            }.onSuccess { (source, edited) ->
                 _settingsState.update {
                     it.copy(
                         webDavForm = it.webDavForm.copy(password = ""),
-                        message = "已添加 WebDAV：${source.name}",
-                        error = null
+                        webDavMessage = if (edited) "已保存 WebDAV：${source.name}" else "已添加 WebDAV：${source.name}",
+                        webDavError = null
                     )
                 }
             }.onFailure { error ->
-                _settingsState.update { it.copy(error = error.message ?: "添加 WebDAV 失败") }
+                _settingsState.update { it.copy(webDavMessage = null, webDavError = error.message ?: "添加 WebDAV 失败") }
             }
         }
+    }
+
+    private fun effectiveWebDavPassword(form: WebDavSourceForm): String {
+        if (form.password.isNotBlank()) return form.password
+        val sourceId = form.editingSourceId ?: return ""
+        return videoRepository.webDavSavedPassword(sourceId).orEmpty()
     }
 
     fun deleteLibrarySource(sourceId: String) {
@@ -786,6 +879,18 @@ class AppViewModel(
                     }
                 }
                 .onFailure { error -> _settingsState.update { it.copy(error = error.message ?: "删除来源失败") } }
+        }
+    }
+
+    fun renameLibrarySource(sourceId: String, name: String) {
+        viewModelScope.launch {
+            runCatching { videoRepository.renameSource(sourceId, name) }
+                .onSuccess { source ->
+                    _settingsState.update { it.copy(message = "已重命名来源：${source.name}", error = null) }
+                }
+                .onFailure { error ->
+                    _settingsState.update { it.copy(error = error.message ?: "重命名来源失败", message = null) }
+                }
         }
     }
 
@@ -1829,6 +1934,18 @@ class AppViewModel(
         val bw = nb.split(" ").filter { it.isNotBlank() }.toSet()
         if (aw.isEmpty() || bw.isEmpty()) return 0
         return aw.intersect(bw).size * 100 / aw.union(bw).size
+    }
+
+    private fun videoMimeType(video: VideoItem): String {
+        return when (video.extension?.lowercase()) {
+            "mp4" -> "video/mp4"
+            "webm" -> "video/webm"
+            "mkv" -> "video/x-matroska"
+            "mov" -> "video/quicktime"
+            "avi" -> "video/x-msvideo"
+            "wmv" -> "video/x-ms-wmv"
+            else -> "video/*"
+        }
     }
 
     private fun normalizeTitle(value: String): String {

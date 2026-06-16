@@ -81,7 +81,6 @@ fun buildVideoInfoLine(
 ): String {
     return listOfNotNull(
         video.quality,
-        video.sourceVideoId?.let { "ID:$it" },
         formatDuration(video.durationMs).takeIf { it != "未知时长" },
         if (video.width != null && video.height != null) {
             "${video.width}x${video.height}"

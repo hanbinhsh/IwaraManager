@@ -18,6 +18,7 @@ data class LibrarySource(
     val webDavBaseUrl: String? = null,
     val webDavRootPath: String? = null,
     val webDavUsername: String? = null,
+    val webDavAllowInsecureTls: Boolean = false,
     val remoteIndexMode: RemoteIndexMode = RemoteIndexMode.Light,
     val connectTimeoutSeconds: Int = 15,
     val readTimeoutSeconds: Int = 30,
@@ -46,11 +47,13 @@ data class LibraryFolderNode(
 )
 
 data class WebDavSourceForm(
+    val editingSourceId: String? = null,
     val name: String = "",
     val baseUrl: String = "",
     val rootPath: String = "/",
     val username: String = "",
     val password: String = "",
+    val allowInsecureTls: Boolean = false,
     val indexMode: RemoteIndexMode = RemoteIndexMode.Light,
     val connectTimeoutSecondsText: String = "15",
     val connectTimeoutSeconds: Int = 15,

@@ -26,8 +26,9 @@ import com.ice.iwaramanager.data.model.RemoteIndexMode
 import com.ice.iwaramanager.data.model.VideoItem
 import com.ice.iwaramanager.data.remote.WebDavClient
 import com.ice.iwaramanager.domain.parser.IwaraFilenameParser
+import com.ice.iwaramanager.domain.scanner.KnownVideo
 import com.ice.iwaramanager.domain.scanner.ScanProgress
-import com.ice.iwaramanager.domain.scanner.ScannedLibrary
+import com.ice.iwaramanager.domain.scanner.ScannedVideo
 import com.ice.iwaramanager.domain.scanner.VideoScanner
 import com.ice.iwaramanager.domain.scanner.WebDavVideoScanner
 import com.ice.iwaramanager.domain.security.WebDavCredentialStore
@@ -113,6 +114,7 @@ class VideoRepository(context: Context) {
         rootPath: String,
         username: String,
         password: String,
+        allowInsecureTls: Boolean,
         indexMode: RemoteIndexMode,
         connectTimeoutSeconds: Int,
         readTimeoutSeconds: Int
@@ -129,6 +131,7 @@ class VideoRepository(context: Context) {
             webDavBaseUrl = fixedBaseUrl,
             webDavRootPath = fixedRootPath,
             webDavUsername = username.trim().ifBlank { null },
+            webDavAllowInsecureTls = allowInsecureTls,
             remoteIndexMode = indexMode,
             connectTimeoutSeconds = connectTimeoutSeconds.coerceIn(5, 120),
             readTimeoutSeconds = readTimeoutSeconds.coerceIn(5, 180),
@@ -144,12 +147,62 @@ class VideoRepository(context: Context) {
         return source
     }
 
+    suspend fun updateWebDavSource(
+        sourceId: String,
+        name: String,
+        baseUrl: String,
+        rootPath: String,
+        username: String,
+        password: String,
+        allowInsecureTls: Boolean,
+        indexMode: RemoteIndexMode,
+        connectTimeoutSeconds: Int,
+        readTimeoutSeconds: Int
+    ): LibrarySource {
+        val old = sourceDao.getSource(sourceId)?.toLibrarySource() ?: error("WebDAV 来源不存在")
+        require(old.type == LibrarySourceType.WebDav) { "只能编辑 WebDAV 来源" }
+        val fixedBaseUrl = webDavClient.normalizeBaseUrl(baseUrl)
+        val fixedRootPath = rootPath.trim().ifBlank { "/" }
+        val source = old.copy(
+            name = name.trim().ifBlank { fixedBaseUrl.substringAfter("//") },
+            webDavBaseUrl = fixedBaseUrl,
+            webDavRootPath = fixedRootPath,
+            webDavUsername = username.trim().ifBlank { null },
+            webDavAllowInsecureTls = allowInsecureTls,
+            remoteIndexMode = indexMode,
+            connectTimeoutSeconds = connectTimeoutSeconds.coerceIn(5, 120),
+            readTimeoutSeconds = readTimeoutSeconds.coerceIn(5, 180),
+            updatedAt = System.currentTimeMillis()
+        )
+        webDavClient.validateSource(source)
+        val oldPassword = credentialStore.loadPassword(sourceId)
+        if (source.webDavUsername != null && password.isBlank() && oldPassword.isNullOrBlank()) {
+            error("已填写用户名，但密码为空")
+        }
+        sourceDao.upsertSource(source.toEntity())
+        if (password.isNotBlank()) credentialStore.savePassword(sourceId, password)
+        return source
+    }
+
+    suspend fun renameSource(sourceId: String, name: String): LibrarySource = withContext(Dispatchers.IO) {
+        val old = sourceDao.getSource(sourceId)?.toLibrarySource() ?: error("来源不存在")
+        val fixedName = name.trim()
+        require(fixedName.isNotBlank()) { "来源名称不能为空" }
+        val source = old.copy(
+            name = fixedName,
+            updatedAt = System.currentTimeMillis()
+        )
+        sourceDao.upsertSource(source.toEntity())
+        source
+    }
+
     suspend fun testWebDavConnection(
         name: String,
         baseUrl: String,
         rootPath: String,
         username: String,
         password: String,
+        allowInsecureTls: Boolean,
         indexMode: RemoteIndexMode,
         connectTimeoutSeconds: Int,
         readTimeoutSeconds: Int
@@ -162,6 +215,7 @@ class VideoRepository(context: Context) {
             webDavBaseUrl = webDavClient.normalizeBaseUrl(baseUrl),
             webDavRootPath = rootPath.trim().ifBlank { "/" },
             webDavUsername = username.trim().ifBlank { null },
+            webDavAllowInsecureTls = allowInsecureTls,
             remoteIndexMode = indexMode,
             connectTimeoutSeconds = connectTimeoutSeconds.coerceIn(5, 120),
             readTimeoutSeconds = readTimeoutSeconds.coerceIn(5, 180),
@@ -328,68 +382,78 @@ class VideoRepository(context: Context) {
         scanSource(source.id, onProgress)
     }
 
+    /**
+     * 将历史封面从 cacheDir 迁移到 filesDir（持久化目录），并修正数据库中的封面路径。
+     * 旧版本把封面写在 cacheDir，可能被系统在存储紧张时清理；迁移后断开 WebDAV 也能离线显示封面。
+     * 幂等：cacheDir 中无残留封面时直接返回，不做任何操作。
+     */
+    suspend fun migrateCoversToPersistentDir() = withContext(Dispatchers.IO) {
+        val oldDir = File(appContext.cacheDir, "video_covers")
+        val files = oldDir.listFiles()?.filter { it.isFile } ?: return@withContext
+        if (files.isEmpty()) return@withContext
+        val newDir = File(appContext.filesDir, "video_covers")
+        if (!newDir.exists()) newDir.mkdirs()
+        var migrated = false
+        for (file in files) {
+            val target = File(newDir, file.name)
+            val ok = when {
+                target.exists() && target.length() > 0L -> file.delete().let { true }
+                file.renameTo(target) -> true
+                else -> runCatching { file.copyTo(target, overwrite = true); file.delete(); true }.getOrDefault(false)
+            }
+            if (ok) migrated = true
+        }
+        if (migrated) {
+            val oldPrefix = oldDir.absolutePath + File.separator
+            val newPrefix = newDir.absolutePath + File.separator
+            videoDao.updateCoverDir(oldPrefix, newPrefix, "$oldPrefix%")
+        }
+    }
+
     suspend fun scanSource(sourceId: String, onProgress: (ScanProgress) -> Unit = {}) = withContext(Dispatchers.IO) {
         val source = sourceDao.getSource(sourceId)?.toLibrarySource() ?: error("来源不存在")
-        val scanned = when (source.type) {
-            LibrarySourceType.LocalSaf -> scanner.scanLibrary(Uri.parse(source.rootUriString), onProgress)
-            LibrarySourceType.WebDav -> webDavScanner.scan(source, credentialStore.loadPassword(source.id), onProgress)
-        }
-        syncScanResult(source, scanned)
-    }
-
-    suspend fun scanSources(sourceIds: List<String>, onProgress: (ScanProgress) -> Unit = {}) {
-        val sources = if (sourceIds.isEmpty()) getSources() else getSources().filter { it.id in sourceIds }
-        sources.forEach { source -> scanSource(source.id, onProgress) }
-    }
-
-    private suspend fun syncScanResult(source: LibrarySource, scanned: ScannedLibrary) {
         val now = System.currentTimeMillis()
+
+        // 预读数据库中已有的视频，用于增量扫描（跳过未变化文件的元数据/封面读取）
+        // 以及合并已匹配的远程元数据、判断哪些文件已被删除。
         val oldEntities = videoDao.findAllByRoot(source.id).associateBy { it.uriString }
-        val newEntities = scanned.videos.map { scannedVideo ->
-            val parsed = IwaraFilenameParser.parse(scannedVideo.displayName)
-            val old = oldEntities[scannedVideo.uriString]
-            VideoEntity(
-                uriString = scannedVideo.uriString,
-                libraryRootUriString = source.id,
-                sourceId = source.id,
-                relativePath = scannedVideo.relativePath,
-                parentPath = scannedVideo.parentPath,
-                displayName = scannedVideo.displayName,
-                fileSize = scannedVideo.fileSize,
-                lastModified = scannedVideo.lastModified,
-                title = parsed.titleFromFilename,
-                sourceVideoId = parsed.videoId,
-                quality = parsed.quality,
-                extension = parsed.extension,
-                durationMs = scannedVideo.durationMs ?: old?.durationMs,
-                width = scannedVideo.width ?: old?.width,
-                height = scannedVideo.height ?: old?.height,
-                coverFilePath = scannedVideo.coverFilePath ?: old?.coverFilePath,
-                matchedIwaraId = old?.matchedIwaraId,
-                remoteTitle = old?.remoteTitle,
-                remoteDescription = old?.remoteDescription,
-                remoteAuthorId = old?.remoteAuthorId,
-                remoteAuthorName = old?.remoteAuthorName,
-                remoteAuthorUsername = old?.remoteAuthorUsername,
-                remoteAuthorAvatarUrl = old?.remoteAuthorAvatarUrl,
-                remoteThumbnailUrl = old?.remoteThumbnailUrl,
-                remoteRating = old?.remoteRating,
-                remoteVisibility = old?.remoteVisibility,
-                remoteCreatedAt = old?.remoteCreatedAt,
-                remoteUpdatedAt = old?.remoteUpdatedAt,
-                remoteDurationSeconds = old?.remoteDurationSeconds,
-                remoteLikeCount = old?.remoteLikeCount,
-                remoteViewCount = old?.remoteViewCount,
-                remoteCommentCount = old?.remoteCommentCount,
-                remoteRawJson = old?.remoteRawJson,
-                matchStatus = old?.matchStatus ?: "unmatched",
-                createdAt = old?.createdAt ?: now,
-                updatedAt = now
+        val known = oldEntities.mapValues { (_, old) ->
+            KnownVideo(
+                fileSize = old.fileSize,
+                lastModified = old.lastModified,
+                hasDuration = old.durationMs != null,
+                coverFilePath = old.coverFilePath
             )
         }
+
+        val seenUris = mutableSetOf<String>()
+        val buffer = mutableListOf<VideoEntity>()
+
+        // 边扫边存：每累积一批就立即写入数据库，扫描中途失败/闪退也能保留已扫描的数据。
+        suspend fun flush() {
+            if (buffer.isEmpty()) return
+            videoDao.upsertAll(buffer.toList())
+            buffer.clear()
+        }
+
+        val onVideo: suspend (ScannedVideo) -> Unit = { scannedVideo ->
+            seenUris += scannedVideo.uriString
+            buffer += mergeScannedVideo(scannedVideo, oldEntities[scannedVideo.uriString], source, now)
+            if (buffer.size >= SCAN_FLUSH_BATCH_SIZE) flush()
+        }
+
+        val folders = when (source.type) {
+            LibrarySourceType.LocalSaf ->
+                scanner.scanLibrary(Uri.parse(source.rootUriString), known, onProgress, onVideo)
+            LibrarySourceType.WebDav ->
+                webDavScanner.scan(source, credentialStore.loadPassword(source.id), known, onProgress, onVideo)
+        }
+        flush()
+
+        // 扫描成功完成后：更新目录树、删除已不存在的视频、刷新来源时间戳。
         db.withTransaction {
             sourceDao.deleteFoldersForSource(source.id)
-            val folderEntities = scanned.folders.map {
+            val folderEntities = folders.map {
                 LibraryFolderEntity(
                     sourceId = source.id,
                     sourceName = source.name,
@@ -400,14 +464,62 @@ class VideoRepository(context: Context) {
                 )
             }
             if (folderEntities.isNotEmpty()) sourceDao.upsertFolders(folderEntities)
-            if (newEntities.isEmpty()) {
-                videoDao.deleteBySource(source.id)
-            } else {
-                videoDao.upsertAll(newEntities)
-                videoDao.deleteMissingBySource(source.id, newEntities.map { it.uriString })
-            }
+            val removedUris = oldEntities.keys - seenUris
+            removedUris.chunked(500).forEach { videoDao.deleteByUris(it) }
             sourceDao.upsertSource(source.copy(updatedAt = now).toEntity())
         }
+    }
+
+    suspend fun scanSources(sourceIds: List<String>, onProgress: (ScanProgress) -> Unit = {}) {
+        val sources = if (sourceIds.isEmpty()) getSources() else getSources().filter { it.id in sourceIds }
+        sources.forEach { source -> scanSource(source.id, onProgress) }
+    }
+
+    private fun mergeScannedVideo(
+        scannedVideo: ScannedVideo,
+        old: VideoEntity?,
+        source: LibrarySource,
+        now: Long
+    ): VideoEntity {
+        val parsed = IwaraFilenameParser.parse(scannedVideo.displayName)
+        return VideoEntity(
+            uriString = scannedVideo.uriString,
+            libraryRootUriString = source.id,
+            sourceId = source.id,
+            relativePath = scannedVideo.relativePath,
+            parentPath = scannedVideo.parentPath,
+            displayName = scannedVideo.displayName,
+            fileSize = scannedVideo.fileSize,
+            lastModified = scannedVideo.lastModified,
+            title = parsed.titleFromFilename,
+            sourceVideoId = parsed.videoId,
+            quality = parsed.quality,
+            extension = parsed.extension,
+            durationMs = scannedVideo.durationMs ?: old?.durationMs,
+            width = scannedVideo.width ?: old?.width,
+            height = scannedVideo.height ?: old?.height,
+            coverFilePath = scannedVideo.coverFilePath ?: old?.coverFilePath,
+            matchedIwaraId = old?.matchedIwaraId,
+            remoteTitle = old?.remoteTitle,
+            remoteDescription = old?.remoteDescription,
+            remoteAuthorId = old?.remoteAuthorId,
+            remoteAuthorName = old?.remoteAuthorName,
+            remoteAuthorUsername = old?.remoteAuthorUsername,
+            remoteAuthorAvatarUrl = old?.remoteAuthorAvatarUrl,
+            remoteThumbnailUrl = old?.remoteThumbnailUrl,
+            remoteRating = old?.remoteRating,
+            remoteVisibility = old?.remoteVisibility,
+            remoteCreatedAt = old?.remoteCreatedAt,
+            remoteUpdatedAt = old?.remoteUpdatedAt,
+            remoteDurationSeconds = old?.remoteDurationSeconds,
+            remoteLikeCount = old?.remoteLikeCount,
+            remoteViewCount = old?.remoteViewCount,
+            remoteCommentCount = old?.remoteCommentCount,
+            remoteRawJson = old?.remoteRawJson,
+            matchStatus = old?.matchStatus ?: "unmatched",
+            createdAt = old?.createdAt ?: now,
+            updatedAt = old?.updatedAt ?: now
+        )
     }
 
     suspend fun findVideoByUri(uriString: String): VideoItem? = videoDao.findByUri(uriString)?.toVideoItem()
@@ -557,6 +669,10 @@ class VideoRepository(context: Context) {
         return webDavClient.authHeaders(source, credentialStore.loadPassword(source.id))
     }
 
+    fun webDavSavedPassword(sourceId: String): String? {
+        return credentialStore.loadPassword(sourceId)
+    }
+
     private fun localDisplayName(uri: Uri): String {
         return DocumentFile.fromTreeUri(appContext, uri)?.name?.takeIf { it.isNotBlank() }
             ?: uri.lastPathSegment?.substringAfterLast(':')?.takeIf { it.isNotBlank() }
@@ -581,5 +697,8 @@ class VideoRepository(context: Context) {
 
     private companion object {
         const val DATABASE_NAME = "iwara_manager.db"
+
+        // 边扫边存的批量大小：每扫描到这么多视频就写入一次数据库。
+        const val SCAN_FLUSH_BATCH_SIZE = 25
     }
 }

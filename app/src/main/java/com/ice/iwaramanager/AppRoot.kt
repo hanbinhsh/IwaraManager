@@ -16,6 +16,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.ice.iwaramanager.data.model.MainTab
@@ -74,6 +75,10 @@ fun AppRoot(
     val tabBeforeDetail = remember {
         mutableStateOf(MainTab.Library)
     }
+
+    // 在不同路由间切换时保留各屏幕的可保存状态（如列表滚动位置），
+    // 这样从详情页返回时库列表会停在原来的位置而不是回到顶部。
+    val saveableStateHolder = rememberSaveableStateHolder()
 
     val folderPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
@@ -166,6 +171,7 @@ fun AppRoot(
         }
     }
 
+    saveableStateHolder.SaveableStateProvider(currentRoute.value) {
     when (currentRoute.value) {
         Routes.Library,
         Routes.Search -> {
@@ -250,11 +256,15 @@ fun AppRoot(
                 onWebDavRootPathChange = viewModel::updateWebDavRootPath,
                 onWebDavUsernameChange = viewModel::updateWebDavUsername,
                 onWebDavPasswordChange = viewModel::updateWebDavPassword,
+                onWebDavAllowInsecureTlsChange = viewModel::setWebDavAllowInsecureTls,
                 onWebDavIndexModeChange = viewModel::setWebDavIndexMode,
                 onWebDavConnectTimeoutSecondsChange = viewModel::setWebDavConnectTimeoutSeconds,
                 onWebDavReadTimeoutSecondsChange = viewModel::setWebDavReadTimeoutSeconds,
                 onTestWebDav = viewModel::testWebDavSource,
+                onPrepareNewWebDav = viewModel::prepareNewWebDavSource,
+                onEditWebDav = viewModel::editWebDavSource,
                 onAddWebDav = viewModel::addWebDavSource,
+                onRenameSource = viewModel::renameLibrarySource,
                 onDeleteSource = viewModel::deleteLibrarySource,
                 onScanSource = viewModel::scanLibrarySource,
                 onRemoteProxyIdleTimeoutSecondsChange = viewModel::setRemoteProxyIdleTimeoutSeconds,
@@ -370,6 +380,7 @@ fun AppRoot(
             )
         }
     }
+    }
 }
 
 private fun openVideoWithExternalPlayer(
@@ -399,7 +410,8 @@ private fun openVideoWithExternalPlayer(
                 headers = headers,
                 mimeType = videoMimeType(video),
                 readTimeoutSeconds = settingsState.remoteProxyReadTimeoutSeconds,
-                idleTimeoutSeconds = settingsState.remoteProxyIdleTimeoutSeconds
+                idleTimeoutSeconds = settingsState.remoteProxyIdleTimeoutSeconds,
+                allowInsecureTls = source.webDavAllowInsecureTls
             )
         }.getOrElse { error ->
             Toast.makeText(context, "启动远程播放代理失败：${error.message ?: error::class.java.simpleName}", Toast.LENGTH_SHORT).show()

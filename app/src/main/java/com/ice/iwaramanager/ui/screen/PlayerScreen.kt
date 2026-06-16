@@ -18,13 +18,18 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
@@ -85,6 +90,7 @@ fun PlayerScreen(
             val playbackUri = state.playbackUriString ?: video.uriString
             val uri = remember(playbackUri) { Uri.parse(playbackUri) }
             val headers = state.requestHeaders
+            var playbackError by remember(playbackUri, headers) { mutableStateOf<String?>(null) }
 
             val player = remember(playbackUri, headers) {
                 val builder = ExoPlayer.Builder(context)
@@ -103,7 +109,32 @@ fun PlayerScreen(
             }
 
             DisposableEffect(player) {
-                onDispose { player.release() }
+                val listener = object : Player.Listener {
+                    override fun onPlayerError(error: PlaybackException) {
+                        playbackError = buildString {
+                            append("播放失败：").append(error.errorCodeName)
+                            val message = error.message
+                            if (!message.isNullOrBlank()) append("；").append(message)
+                            error.cause?.message?.takeIf { it.isNotBlank() }?.let {
+                                append("\n").append(it)
+                            }
+                        }
+                    }
+                }
+                player.addListener(listener)
+                onDispose {
+                    player.removeListener(listener)
+                    player.release()
+                }
+            }
+
+            playbackError?.let { error ->
+                Text(
+                    text = error,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+                )
             }
 
             AndroidView(

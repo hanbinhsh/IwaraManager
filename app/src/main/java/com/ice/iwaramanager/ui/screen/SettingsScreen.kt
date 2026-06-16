@@ -6,9 +6,11 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -65,11 +67,15 @@ fun SettingsScreen(
     onWebDavRootPathChange: (String) -> Unit,
     onWebDavUsernameChange: (String) -> Unit,
     onWebDavPasswordChange: (String) -> Unit,
+    onWebDavAllowInsecureTlsChange: (Boolean) -> Unit,
     onWebDavIndexModeChange: (RemoteIndexMode) -> Unit,
     onWebDavConnectTimeoutSecondsChange: (String) -> Unit,
     onWebDavReadTimeoutSecondsChange: (String) -> Unit,
     onTestWebDav: () -> Unit,
+    onPrepareNewWebDav: () -> Unit,
+    onEditWebDav: (String) -> Unit,
     onAddWebDav: () -> Unit,
+    onRenameSource: (String, String) -> Unit,
     onDeleteSource: (String) -> Unit,
     onScanSource: (String) -> Unit,
     onRemoteProxyIdleTimeoutSecondsChange: (String) -> Unit,
@@ -97,8 +103,12 @@ fun SettingsScreen(
 ) {
     var showClearDatabaseDialog by remember { mutableStateOf(false) }
     var showClearFolderDialog by remember { mutableStateOf(false) }
+    var showAddSourceDialog by remember { mutableStateOf(false) }
+    var showWebDavDialog by remember { mutableStateOf(false) }
+    var localSourceToRename by remember { mutableStateOf<LibrarySource?>(null) }
+    var localSourceName by remember { mutableStateOf("") }
     var selectedTab by rememberSaveable { mutableStateOf(0) }
-    val tabs = listOf("目录", "网络盘", "显示", "播放", "匹配", "数据库")
+    val tabs = listOf("目录", "显示", "播放", "匹配", "数据库")
 
     ConfirmDialog(
         visible = showClearDatabaseDialog,
@@ -120,6 +130,45 @@ fun SettingsScreen(
         onConfirm = {
             showClearFolderDialog = false
             onClearFolder()
+        }
+    )
+    AddSourceDialog(
+        visible = showAddSourceDialog,
+        onDismiss = { showAddSourceDialog = false },
+        onPickLocal = {
+            showAddSourceDialog = false
+            onPickFolder()
+        },
+        onPickWebDav = {
+            showAddSourceDialog = false
+            onPrepareNewWebDav()
+            showWebDavDialog = true
+        }
+    )
+    WebDavDialog(
+        visible = showWebDavDialog,
+        state = state,
+        onDismiss = { showWebDavDialog = false },
+        onWebDavNameChange = onWebDavNameChange,
+        onWebDavBaseUrlChange = onWebDavBaseUrlChange,
+        onWebDavRootPathChange = onWebDavRootPathChange,
+        onWebDavUsernameChange = onWebDavUsernameChange,
+        onWebDavPasswordChange = onWebDavPasswordChange,
+        onWebDavAllowInsecureTlsChange = onWebDavAllowInsecureTlsChange,
+        onWebDavIndexModeChange = onWebDavIndexModeChange,
+        onWebDavConnectTimeoutSecondsChange = onWebDavConnectTimeoutSecondsChange,
+        onWebDavReadTimeoutSecondsChange = onWebDavReadTimeoutSecondsChange,
+        onTestWebDav = onTestWebDav,
+        onAddWebDav = onAddWebDav
+    )
+    LocalSourceNameDialog(
+        source = localSourceToRename,
+        name = localSourceName,
+        onNameChange = { localSourceName = it },
+        onDismiss = { localSourceToRename = null },
+        onConfirm = { source ->
+            onRenameSource(source.id, localSourceName)
+            localSourceToRename = null
         }
     )
 
@@ -154,34 +203,28 @@ fun SettingsScreen(
             when (selectedTab) {
                 0 -> DirectorySettings(
                     state = state,
-                    onPickFolder = onPickFolder,
+                    onShowAddSourceDialog = { showAddSourceDialog = true },
                     onRescan = onRescan,
                     onClearFolder = { showClearFolderDialog = true },
                     onScanSource = onScanSource,
+                    onEditSource = { source ->
+                        if (source.type == LibrarySourceType.WebDav) {
+                            onEditWebDav(source.id)
+                            showWebDavDialog = true
+                        } else {
+                            localSourceToRename = source
+                            localSourceName = source.name
+                        }
+                    },
                     onDeleteSource = onDeleteSource
                 )
-                1 -> WebDavSettings(
-                    state = state,
-                    onWebDavNameChange = onWebDavNameChange,
-                    onWebDavBaseUrlChange = onWebDavBaseUrlChange,
-                    onWebDavRootPathChange = onWebDavRootPathChange,
-                    onWebDavUsernameChange = onWebDavUsernameChange,
-                    onWebDavPasswordChange = onWebDavPasswordChange,
-                    onWebDavIndexModeChange = onWebDavIndexModeChange,
-                    onWebDavConnectTimeoutSecondsChange = onWebDavConnectTimeoutSecondsChange,
-                    onWebDavReadTimeoutSecondsChange = onWebDavReadTimeoutSecondsChange,
-                    onTestWebDav = onTestWebDav,
-                    onAddWebDav = onAddWebDav,
-                    onScanSource = onScanSource,
-                    onDeleteSource = onDeleteSource
-                )
-                2 -> DisplaySettings(
+                1 -> DisplaySettings(
                     state = state,
                     onLayoutModeChange = onLayoutModeChange,
                     onGridColumnsChange = onGridColumnsChange,
                     onShowRematchButtonInListChange = onShowRematchButtonInListChange
                 )
-                3 -> PlaybackSettings(
+                2 -> PlaybackSettings(
                     state = state,
                     videoPlayerApps = videoPlayerApps,
                     onVideoOpenModeChange = onVideoOpenModeChange,
@@ -191,7 +234,7 @@ fun SettingsScreen(
                     onRemoteProxyReadTimeoutSecondsChange = onRemoteProxyReadTimeoutSecondsChange,
                     onShowRemotePlaybackDiagnosticsChange = onShowRemotePlaybackDiagnosticsChange
                 )
-                4 -> MatchSettings(
+                3 -> MatchSettings(
                     state = state,
                     onIwaraMatchModeChange = onIwaraMatchModeChange,
                     onMatchSearchTimeoutSecondsChange = onMatchSearchTimeoutSecondsChange,
@@ -215,22 +258,79 @@ fun SettingsScreen(
                 )
             }
 
-            state.error?.let {
-                Text(
-                    text = it,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                )
-            }
-            state.message?.let {
-                Text(
-                    text = it,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                )
-            }
         }
     }
+}
+
+@Composable
+private fun AddSourceDialog(
+    visible: Boolean,
+    onDismiss: () -> Unit,
+    onPickLocal: () -> Unit,
+    onPickWebDav: () -> Unit
+) {
+    if (!visible) return
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("添加目录") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                ListItem(
+                    headlineContent = { Text("本地目录") },
+                    supportingContent = { Text("从手机或系统文件选择器添加视频目录。") },
+                    trailingContent = { Button(onClick = onPickLocal) { Text("选择") } }
+                )
+                ListItem(
+                    headlineContent = { Text("WebDAV 网络盘") },
+                    supportingContent = { Text("添加 NAS、路由器或网盘的 WebDAV 地址。") },
+                    trailingContent = { Button(onClick = onPickWebDav) { Text("配置") } }
+                )
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
+    )
+}
+
+@Composable
+private fun LocalSourceNameDialog(
+    source: LibrarySource?,
+    name: String,
+    onNameChange: (String) -> Unit,
+    onDismiss: () -> Unit,
+    onConfirm: (LibrarySource) -> Unit
+) {
+    if (source == null) return
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("编辑本地目录") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = onNameChange,
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("显示名称") },
+                    placeholder = { Text("例如：本地视频 / NAS缓存") }
+                )
+                Text(
+                    text = source.rootUriString,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onConfirm(source) },
+                enabled = name.isNotBlank()
+            ) { Text("保存") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
 }
 
 @Composable
@@ -253,31 +353,144 @@ private fun ConfirmDialog(
 }
 
 @Composable
+private fun WebDavDialog(
+    visible: Boolean,
+    state: SettingsUiState,
+    onDismiss: () -> Unit,
+    onWebDavNameChange: (String) -> Unit,
+    onWebDavBaseUrlChange: (String) -> Unit,
+    onWebDavRootPathChange: (String) -> Unit,
+    onWebDavUsernameChange: (String) -> Unit,
+    onWebDavPasswordChange: (String) -> Unit,
+    onWebDavAllowInsecureTlsChange: (Boolean) -> Unit,
+    onWebDavIndexModeChange: (RemoteIndexMode) -> Unit,
+    onWebDavConnectTimeoutSecondsChange: (String) -> Unit,
+    onWebDavReadTimeoutSecondsChange: (String) -> Unit,
+    onTestWebDav: () -> Unit,
+    onAddWebDav: () -> Unit
+) {
+    if (!visible) return
+    val form = state.webDavForm
+    val editing = form.editingSourceId != null
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (editing) "编辑网络盘" else "添加网络盘") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 520.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                InlineTextField("名称", form.name, onWebDavNameChange, "NAS / WebDAV")
+                InlineTextField("服务器地址", form.baseUrl, onWebDavBaseUrlChange, "192.168.8.1:6008")
+                InlineTextField("扫描路径", form.rootPath, onWebDavRootPathChange, "/disk2_part1/games")
+                Text(
+                    text = "只扫描这个 WebDAV 路径及其子目录；填 / 表示扫描整个 WebDAV 根目录。",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall
+                )
+                InlineTextField("账号", form.username, onWebDavUsernameChange, "可留空")
+                InlineTextField("密码", form.password, onWebDavPasswordChange, if (editing) "留空保留原密码" else "WebDAV 密码")
+                Text("索引方式", style = MaterialTheme.typography.labelMedium)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FilterChip(
+                        selected = form.indexMode == RemoteIndexMode.Light,
+                        onClick = { onWebDavIndexModeChange(RemoteIndexMode.Light) },
+                        label = { Text("轻索引") }
+                    )
+                    FilterChip(
+                        selected = form.indexMode == RemoteIndexMode.Full,
+                        onClick = { onWebDavIndexModeChange(RemoteIndexMode.Full) },
+                        label = { Text("完整索引") }
+                    )
+                }
+                Text(
+                    text = "轻索引只读取目录和文件信息，速度快，可用于浏览、搜索、播放和匹配，但不生成封面/时长。完整索引会逐个打开远程视频尝试读取时长、分辨率和封面，速度取决于 WebDAV 服务和网络；单个视频最多等待读取超时秒数。",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall
+                )
+                SwitchItem(
+                    title = "允许不受信任证书",
+                    description = "仅用于路由器或 NAS 自签证书；开启后会跳过该 WebDAV 来源的证书校验。",
+                    checked = form.allowInsecureTls,
+                    onCheckedChange = onWebDavAllowInsecureTlsChange
+                )
+                InlineNumberField("连接超时秒数", form.connectTimeoutSecondsText, onWebDavConnectTimeoutSecondsChange, "5-120")
+                InlineNumberField("读取/完整索引单文件超时秒数", form.readTimeoutSecondsText, onWebDavReadTimeoutSecondsChange, "5-180")
+                state.webDavError?.let {
+                    SelectionContainer {
+                        Text(
+                            text = it,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 180.dp)
+                                .verticalScroll(rememberScrollState())
+                        )
+                    }
+                }
+                state.webDavMessage?.let {
+                    Text(
+                        text = it,
+                        color = MaterialTheme.colorScheme.primary,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(onClick = onTestWebDav, enabled = !state.isScanning) { Text("测试") }
+                Button(onClick = onAddWebDav, enabled = !state.isScanning) { Text(if (editing) "保存" else "添加") }
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
+    )
+}
+
+@Composable
 private fun DirectorySettings(
     state: SettingsUiState,
-    onPickFolder: () -> Unit,
+    onShowAddSourceDialog: () -> Unit,
     onRescan: () -> Unit,
     onClearFolder: () -> Unit,
     onScanSource: (String) -> Unit,
+    onEditSource: (LibrarySource) -> Unit,
     onDeleteSource: (String) -> Unit
 ) {
-    SectionTitle("本地视频目录")
+    SectionTitle("目录")
     ListItem(
-        headlineContent = { Text("添加本地目录") },
-        supportingContent = { Text("可添加多个本地 Iwara 视频目录，主页来源下拉中会分别显示。") },
-        trailingContent = { Button(onClick = onPickFolder) { Text("添加") } }
+        headlineContent = { Text("添加目录") },
+        supportingContent = { Text("可以添加多个本地目录或 WebDAV 网络盘。") },
+        trailingContent = {
+            Button(onClick = onShowAddSourceDialog) { Text("添加") }
+        }
     )
     val localSources = state.librarySources.filter { it.type == LibrarySourceType.LocalSaf }
+    SectionTitle("本地目录")
     if (localSources.isEmpty()) {
         ListItem(
             headlineContent = { Text("尚未添加本地目录") },
             supportingContent = { Text("添加后可以单独扫描，也可以在主页选择全部来源。") }
         )
     } else {
-        localSources.forEach {
-            SourceListItem(it, state.isScanning, onScanSource, onDeleteSource)
-        }
+        localSources.forEach { SourceListItem(it, state.isScanning, onScanSource, onEditSource, onDeleteSource) }
     }
+
+    val webDavSources = state.librarySources.filter { it.type == LibrarySourceType.WebDav }
+    SectionTitle("网络盘")
+    if (webDavSources.isEmpty()) {
+        ListItem(
+            headlineContent = { Text("暂无网络盘") },
+            supportingContent = { Text("点击添加目录里的“网络盘”配置 WebDAV。") }
+        )
+    } else {
+        webDavSources.forEach { SourceListItem(it, state.isScanning, onScanSource, onEditSource, onDeleteSource) }
+    }
+
     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
     ListItem(
         headlineContent = { Text("重新扫描当前来源范围") },
@@ -299,71 +512,7 @@ private fun DirectorySettings(
             ) { Text("清除") }
         }
     )
-}
-
-@Composable
-private fun WebDavSettings(
-    state: SettingsUiState,
-    onWebDavNameChange: (String) -> Unit,
-    onWebDavBaseUrlChange: (String) -> Unit,
-    onWebDavRootPathChange: (String) -> Unit,
-    onWebDavUsernameChange: (String) -> Unit,
-    onWebDavPasswordChange: (String) -> Unit,
-    onWebDavIndexModeChange: (RemoteIndexMode) -> Unit,
-    onWebDavConnectTimeoutSecondsChange: (String) -> Unit,
-    onWebDavReadTimeoutSecondsChange: (String) -> Unit,
-    onTestWebDav: () -> Unit,
-    onAddWebDav: () -> Unit,
-    onScanSource: (String) -> Unit,
-    onDeleteSource: (String) -> Unit
-) {
-    SectionTitle("WebDAV 网络盘")
-    val form = state.webDavForm
-    SettingsTextField("名称", form.name, onWebDavNameChange, "NAS / WebDAV")
-    SettingsTextField("服务器地址", form.baseUrl, onWebDavBaseUrlChange, "https://example.com/dav")
-    SettingsTextField("根路径", form.rootPath, onWebDavRootPathChange, "/")
-    SettingsTextField("账号", form.username, onWebDavUsernameChange, "可留空")
-    SettingsTextField("密码", form.password, onWebDavPasswordChange, "保存时会加密存储")
-    ListItem(
-        headlineContent = { Text("索引方式") },
-        supportingContent = {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                FilterChip(
-                    selected = form.indexMode == RemoteIndexMode.Light,
-                    onClick = { onWebDavIndexModeChange(RemoteIndexMode.Light) },
-                    label = { Text("轻索引") }
-                )
-                FilterChip(
-                    selected = form.indexMode == RemoteIndexMode.Full,
-                    onClick = { onWebDavIndexModeChange(RemoteIndexMode.Full) },
-                    label = { Text("完整索引") }
-                )
-            }
-        }
-    )
-    SettingsNumberField("连接超时秒数", form.connectTimeoutSecondsText, onWebDavConnectTimeoutSecondsChange, "5-120")
-    SettingsNumberField("读取超时秒数", form.readTimeoutSecondsText, onWebDavReadTimeoutSecondsChange, "5-180")
-    ListItem(
-        headlineContent = { Text("连接测试与添加") },
-        supportingContent = { Text("第一版仅支持 HTTPS WebDAV 和 Basic/无认证。连接失败会显示 HTTP 状态或证书/超时原因。") },
-        trailingContent = {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onTestWebDav, enabled = !state.isScanning) { Text("测试") }
-                Button(onClick = onAddWebDav, enabled = !state.isScanning) { Text("添加") }
-            }
-        }
-    )
-    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-    SectionTitle("已添加 WebDAV")
-    val webDavSources = state.librarySources.filter { it.type == LibrarySourceType.WebDav }
-    if (webDavSources.isEmpty()) {
-        ListItem(
-            headlineContent = { Text("暂无 WebDAV 来源") },
-            supportingContent = { Text("添加后会出现在主页来源下拉中。") }
-        )
-    } else {
-        webDavSources.forEach { SourceListItem(it, state.isScanning, onScanSource, onDeleteSource) }
-    }
+    SettingsStatusMessages(state)
 }
 
 @Composable
@@ -548,36 +697,29 @@ private fun DatabaseSettings(
         supportingContent = { Text("删除所有视频记录、匹配信息、来源和任务，不会删除视频文件。") },
         trailingContent = { Button(onClick = onClearDatabase) { Text("清空") } }
     )
+    SettingsStatusMessages(state)
 }
 
 @Composable
-private fun SettingsTextField(
-    title: String,
-    value: String,
-    onValueChange: (String) -> Unit,
-    placeholder: String
-) {
-    ListItem(
-        headlineContent = { Text(title) },
-        supportingContent = {
-            OutlinedTextField(
-                value = value,
-                onValueChange = onValueChange,
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text(placeholder) }
-            )
-        }
-    )
+private fun SettingsStatusMessages(state: SettingsUiState) {
+    state.error?.let {
+        Text(
+            text = it,
+            color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+        )
+    }
+    state.message?.let {
+        Text(
+            text = it,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+        )
+    }
 }
 
 @Composable
-private fun SettingsNumberField(
-    title: String,
-    value: String,
-    onValueChange: (String) -> Unit,
-    placeholder: String
-) {
+private fun SettingsNumberField(title: String, value: String, onValueChange: (String) -> Unit, placeholder: String) {
     ListItem(
         headlineContent = { Text(title) },
         supportingContent = {
@@ -594,12 +736,36 @@ private fun SettingsNumberField(
 }
 
 @Composable
-private fun SwitchItem(
-    title: String,
-    description: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit
-) {
+private fun InlineTextField(title: String, value: String, onValueChange: (String) -> Unit, placeholder: String) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(title, style = MaterialTheme.typography.labelMedium)
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = { Text(placeholder) }
+        )
+    }
+}
+
+@Composable
+private fun InlineNumberField(title: String, value: String, onValueChange: (String) -> Unit, placeholder: String) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(title, style = MaterialTheme.typography.labelMedium)
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            placeholder = { Text(placeholder) }
+        )
+    }
+}
+
+@Composable
+private fun SwitchItem(title: String, description: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
     ListItem(
         headlineContent = { Text(title) },
         supportingContent = { Text(description) },
@@ -612,6 +778,7 @@ private fun SourceListItem(
     source: LibrarySource,
     isScanning: Boolean,
     onScanSource: (String) -> Unit,
+    onEditSource: (LibrarySource) -> Unit,
     onDeleteSource: (String) -> Unit
 ) {
     ListItem(
@@ -620,7 +787,11 @@ private fun SourceListItem(
             Text(
                 text = when (source.type) {
                     LibrarySourceType.LocalSaf -> source.rootUriString
-                    LibrarySourceType.WebDav -> listOfNotNull(source.webDavBaseUrl, source.webDavRootPath).joinToString(" ")
+                    LibrarySourceType.WebDav -> buildString {
+                        append(source.webDavBaseUrl.orEmpty())
+                        if (!source.webDavRootPath.isNullOrBlank()) append(" · 扫描路径 ${source.webDavRootPath}")
+                        if (source.webDavAllowInsecureTls) append(" · 允许自签证书")
+                    }
                 },
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
@@ -629,6 +800,7 @@ private fun SourceListItem(
         trailingContent = {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 TextButton(onClick = { onScanSource(source.id) }, enabled = !isScanning) { Text("扫描") }
+                TextButton(onClick = { onEditSource(source) }, enabled = !isScanning) { Text("编辑") }
                 TextButton(onClick = { onDeleteSource(source.id) }, enabled = !isScanning) { Text("删除") }
             }
         }
