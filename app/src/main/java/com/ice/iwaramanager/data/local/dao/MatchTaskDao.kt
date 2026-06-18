@@ -58,6 +58,9 @@ interface MatchTaskDao {
     @Query("DELETE FROM match_candidate WHERE taskId = :taskId")
     suspend fun deleteCandidatesForTask(taskId: Long)
 
+    @Query("DELETE FROM match_candidate WHERE taskId IN (SELECT id FROM match_task WHERE videoUriString IN (:videoUriStrings))")
+    suspend fun deleteCandidatesForVideos(videoUriStrings: List<String>)
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertCandidates(candidates: List<MatchCandidateEntity>)
 
@@ -98,6 +101,9 @@ interface MatchTaskDao {
 
     @Query("DELETE FROM match_task WHERE libraryRootUriString = :sourceId")
     suspend fun deleteTasksBySource(sourceId: String)
+
+    @Query("DELETE FROM match_task WHERE videoUriString IN (:videoUriStrings)")
+    suspend fun deleteTasksForVideos(videoUriStrings: List<String>)
 
     @Query("DELETE FROM match_task")
     suspend fun clearTasks()

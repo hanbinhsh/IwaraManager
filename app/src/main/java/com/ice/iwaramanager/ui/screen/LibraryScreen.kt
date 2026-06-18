@@ -1,5 +1,7 @@
 package com.ice.iwaramanager.ui.screen
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -45,6 +47,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.LocalMinimumInteractiveComponentSize
 import androidx.compose.material3.MaterialTheme
@@ -61,11 +64,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -82,6 +85,22 @@ import com.ice.iwaramanager.data.model.MatchTaskFilter
 import com.ice.iwaramanager.data.model.MatchTaskStatus
 import com.ice.iwaramanager.data.model.VideoItem
 import java.io.File
+import kotlinx.coroutines.delay
+
+private data class DirectoryScrollPosition(
+    val index: Int,
+    val offset: Int
+)
+
+private data class DirectoryRestoreRequest(
+    val directoryKey: String,
+    val position: DirectoryScrollPosition,
+    val highlightFolderKey: String?,
+    val minContentVersion: Long
+)
+
+private const val HighlightHoldMillis = 1000L
+private const val HighlightFadeMillis = 450
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -91,6 +110,8 @@ fun LibraryScreen(
     selectedTab: MainTab,
     tabReselectTick: Long,
     showRematchButtonInList: Boolean,
+    highlightedVideoUri: String?,
+    onHighlightedVideoConsumed: () -> Unit,
     onSelectTab: (MainTab) -> Unit,
     onSourceScopeChange: (String) -> Unit,
     onOpenDirectory: (LibraryFolderNode) -> Unit,
@@ -125,6 +146,35 @@ fun LibraryScreen(
     val searchListState = rememberLazyListState()
     val searchGridState = rememberLazyGridState()
     val taskListState = rememberLazyListState()
+    val directoryScrollPositions = remember { mutableMapOf<String, DirectoryScrollPosition>() }
+    val currentDirectoryKey = directoryStateKey(libraryState)
+    var pendingDirectoryRestore by remember { mutableStateOf<DirectoryRestoreRequest?>(null) }
+    var highlightedDirectoryFolderKey by remember { mutableStateOf<String?>(null) }
+
+    fun rememberCurrentDirectoryPosition() {
+        directoryScrollPositions[currentDirectoryKey] = DirectoryScrollPosition(
+            index = directoryListState.firstVisibleItemIndex,
+            offset = directoryListState.firstVisibleItemScrollOffset
+        )
+    }
+
+    fun openDirectoryWithPositionMemory(folder: LibraryFolderNode) {
+        rememberCurrentDirectoryPosition()
+        onOpenDirectory(folder)
+    }
+
+    fun navigateDirectoryUpWithPositionRestore() {
+        val parentKey = parentDirectoryStateKey(libraryState)
+        if (parentKey != null) {
+            pendingDirectoryRestore = DirectoryRestoreRequest(
+                directoryKey = parentKey,
+                position = directoryScrollPositions[parentKey] ?: DirectoryScrollPosition(0, 0),
+                highlightFolderKey = currentDirectoryFolderKey(libraryState),
+                minContentVersion = libraryState.directoryContentVersion
+            )
+        }
+        onDirectoryUp()
+    }
 
     suspend fun scrollCurrentTabToTop() {
         when (selectedTab) {
@@ -155,15 +205,49 @@ fun LibraryScreen(
         if (tabReselectTick > 0L) scrollCurrentTabToTop()
     }
 
-    // 仅在进入“另一个目录”时把文件夹列表滚回顶部；从详情页返回（重新进入组合）时
-    // 目录未变，则保留之前的滚动位置。用 rememberSaveable 记住上次所在目录，跨返回仍有效。
-    val currentDirectoryKey = "${libraryState.currentDirectorySourceId}:${libraryState.currentDirectoryPath}"
-    var lastDirectoryKey by rememberSaveable { mutableStateOf(currentDirectoryKey) }
-    LaunchedEffect(libraryState.layoutMode, currentDirectoryKey) {
-        if (libraryState.layoutMode == LibraryLayoutMode.Directory && currentDirectoryKey != lastDirectoryKey) {
+    LaunchedEffect(
+        libraryState.layoutMode,
+        currentDirectoryKey,
+        libraryState.directoryContentVersion,
+        pendingDirectoryRestore
+    ) {
+        val request = pendingDirectoryRestore
+        if (
+            libraryState.layoutMode == LibraryLayoutMode.Directory &&
+            request != null &&
+            request.directoryKey == currentDirectoryKey &&
+            libraryState.directoryContentVersion > request.minContentVersion
+        ) {
+            directoryListState.scrollToItem(
+                index = request.position.index,
+                scrollOffset = request.position.offset
+            )
+            highlightedDirectoryFolderKey = request.highlightFolderKey
+            pendingDirectoryRestore = null
+        }
+    }
+
+    LaunchedEffect(libraryState.layoutMode, libraryState.directoryScrollToken) {
+        if (
+            libraryState.layoutMode == LibraryLayoutMode.Directory &&
+            libraryState.directoryScrollToken > 0L
+        ) {
             directoryListState.scrollToItem(0)
         }
-        lastDirectoryKey = currentDirectoryKey
+    }
+
+    LaunchedEffect(highlightedDirectoryFolderKey) {
+        val highlightedKey = highlightedDirectoryFolderKey ?: return@LaunchedEffect
+        delay(HighlightHoldMillis)
+        if (highlightedDirectoryFolderKey == highlightedKey) {
+            highlightedDirectoryFolderKey = null
+        }
+    }
+
+    LaunchedEffect(highlightedVideoUri) {
+        if (highlightedVideoUri == null) return@LaunchedEffect
+        delay(HighlightHoldMillis)
+        onHighlightedVideoConsumed()
     }
 
     Scaffold(
@@ -251,8 +335,10 @@ fun LibraryScreen(
                 onOpenVideo = onOpenVideo,
                 onMatchVideo = onMatchVideo,
                 onPlayVideo = onPlayVideo,
-                onOpenDirectory = onOpenDirectory,
-                onDirectoryUp = onDirectoryUp,
+                onOpenDirectory = ::openDirectoryWithPositionMemory,
+                onDirectoryUp = ::navigateDirectoryUpWithPositionRestore,
+                highlightedDirectoryFolderKey = highlightedDirectoryFolderKey,
+                highlightedVideoUri = highlightedVideoUri,
                 showRematchButtonInList = showRematchButtonInList
             )
 
@@ -282,7 +368,8 @@ fun LibraryScreen(
                 onOpenVideo = onOpenVideo,
                 onMatchVideo = onMatchVideo,
                 onPlayVideo = onPlayVideo,
-                showRematchButtonInList = showRematchButtonInList
+                showRematchButtonInList = showRematchButtonInList,
+                highlightedVideoUri = highlightedVideoUri
             )
 
             MainTab.Tasks -> MatchTaskContent(
@@ -353,6 +440,8 @@ private fun LibraryContent(
     onPlayVideo: (VideoItem) -> Unit,
     onOpenDirectory: (LibraryFolderNode) -> Unit,
     onDirectoryUp: () -> Unit,
+    highlightedDirectoryFolderKey: String?,
+    highlightedVideoUri: String?,
     showRematchButtonInList: Boolean
 ) {
     Column(modifier = modifier) {
@@ -377,6 +466,8 @@ private fun LibraryContent(
                 listState = directoryListState,
                 onOpenDirectory = onOpenDirectory,
                 onDirectoryUp = onDirectoryUp,
+                highlightedFolderKey = highlightedDirectoryFolderKey,
+                highlightedVideoUri = highlightedVideoUri,
                 onOpenVideo = onOpenVideo,
                 onMatchVideo = onMatchVideo,
                 onPlayVideo = onPlayVideo,
@@ -394,7 +485,8 @@ private fun LibraryContent(
                 onOpenVideo = onOpenVideo,
                 onMatchVideo = onMatchVideo,
                 onPlayVideo = onPlayVideo,
-                showRematchButtonInList = showRematchButtonInList
+                showRematchButtonInList = showRematchButtonInList,
+                highlightedVideoUri = highlightedVideoUri
             )
         }
     }
@@ -407,6 +499,8 @@ private fun DirectoryContent(
     listState: LazyListState,
     onOpenDirectory: (LibraryFolderNode) -> Unit,
     onDirectoryUp: () -> Unit,
+    highlightedFolderKey: String?,
+    highlightedVideoUri: String?,
     onOpenVideo: (VideoItem) -> Unit,
     onMatchVideo: (VideoItem) -> Unit,
     onPlayVideo: (VideoItem) -> Unit,
@@ -437,7 +531,14 @@ private fun DirectoryContent(
             contentPadding = PaddingValues(bottom = 24.dp)
     ) {
         items(state.directoryFolders, key = { "folder:${it.sourceId}:${it.path}" }) { folder ->
+            val folderKey = folderItemKey(folder)
+            val backgroundColor = animatedHighlightColor(
+                highlighted = highlightedFolderKey == folderKey
+            )
             ListItem(
+                colors = ListItemDefaults.colors(
+                    containerColor = backgroundColor
+                ),
                 leadingContent = { Icon(Icons.Filled.FolderOpen, contentDescription = null) },
                 headlineContent = { Text(folder.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 supportingContent = { Text(folder.sourceName, maxLines = 1, overflow = TextOverflow.Ellipsis) },
@@ -447,6 +548,7 @@ private fun DirectoryContent(
         items(state.directoryVideos, key = { it.uriString }) { video ->
             DirectoryVideoItem(
                 video = video,
+                highlighted = highlightedVideoUri == video.uriString,
                 onOpen = { onOpenVideo(video) },
                 onMatch = { onMatchVideo(video) },
                 showRematchButton = video.matchedIwaraId == null || showRematchButtonInList
@@ -459,14 +561,64 @@ private fun DirectoryContent(
     }
 }
 
+private fun directoryStateKey(state: LibraryUiState): String {
+    return directoryStateKey(
+        selectedSourceScopeKey = state.selectedSourceScopeKey,
+        sourceId = state.currentDirectorySourceId,
+        path = state.currentDirectoryPath
+    )
+}
+
+private fun directoryStateKey(
+    selectedSourceScopeKey: String,
+    sourceId: String?,
+    path: String
+): String {
+    return "$selectedSourceScopeKey:${sourceId.orEmpty()}:$path"
+}
+
+private fun parentDirectoryStateKey(state: LibraryUiState): String? {
+    val sourceId = state.currentDirectorySourceId ?: return null
+    val path = state.currentDirectoryPath
+    return if (path.isBlank()) {
+        val selectedScope = state.sourceScopes.firstOrNull { it.key == state.selectedSourceScopeKey }
+        if (selectedScope?.sourceIds?.singleOrNull() == sourceId) {
+            null
+        } else {
+            directoryStateKey(state.selectedSourceScopeKey, null, "")
+        }
+    } else {
+        directoryStateKey(
+            selectedSourceScopeKey = state.selectedSourceScopeKey,
+            sourceId = sourceId,
+            path = path.substringBeforeLast('/', missingDelimiterValue = "")
+        )
+    }
+}
+
+private fun currentDirectoryFolderKey(state: LibraryUiState): String? {
+    val sourceId = state.currentDirectorySourceId ?: return null
+    return "folder:$sourceId:${state.currentDirectoryPath}"
+}
+
+private fun folderItemKey(folder: LibraryFolderNode): String {
+    return "folder:${folder.sourceId}:${folder.path}"
+}
+
 @Composable
 private fun DirectoryVideoItem(
     video: VideoItem,
+    highlighted: Boolean,
     onOpen: () -> Unit,
     onMatch: () -> Unit,
     showRematchButton: Boolean
 ) {
+    val containerColor = animatedHighlightColor(highlighted)
+
     ListItem(
+        colors = ListItemDefaults.colors(
+            containerColor = containerColor
+        ),
         leadingContent = {
             if (video.coverFilePath != null) {
                 AsyncImage(
@@ -522,7 +674,8 @@ private fun SearchContent(
     onOpenVideo: (VideoItem) -> Unit,
     onMatchVideo: (VideoItem) -> Unit,
     onPlayVideo: (VideoItem) -> Unit,
-    showRematchButtonInList: Boolean
+    showRematchButtonInList: Boolean,
+    highlightedVideoUri: String?
 ) {
     Column(modifier = modifier) {
         SearchRow(searchState.query, onQueryChange, onClearQuery)
@@ -550,7 +703,8 @@ private fun SearchContent(
                 onOpenVideo = onOpenVideo,
                 onMatchVideo = onMatchVideo,
                 onPlayVideo = onPlayVideo,
-                showRematchButtonInList = showRematchButtonInList
+                showRematchButtonInList = showRematchButtonInList,
+                highlightedVideoUri = highlightedVideoUri
             )
         }
     }
@@ -596,7 +750,8 @@ private fun VideoShelfContent(
     onOpenVideo: (VideoItem) -> Unit,
     onMatchVideo: (VideoItem) -> Unit,
     onPlayVideo: (VideoItem) -> Unit,
-    showRematchButtonInList: Boolean
+    showRematchButtonInList: Boolean,
+    highlightedVideoUri: String?
 ) {
     when (layoutMode) {
         LibraryLayoutMode.Directory -> VideoListContent(
@@ -606,7 +761,8 @@ private fun VideoShelfContent(
             onOpenVideo = onOpenVideo,
             onMatchVideo = onMatchVideo,
             onPlayVideo = onPlayVideo,
-            showRematchButtonInList = showRematchButtonInList
+            showRematchButtonInList = showRematchButtonInList,
+            highlightedVideoUri = highlightedVideoUri
         )
 
         LibraryLayoutMode.List -> VideoListContent(
@@ -616,7 +772,8 @@ private fun VideoShelfContent(
             onOpenVideo = onOpenVideo,
             onMatchVideo = onMatchVideo,
             onPlayVideo = onPlayVideo,
-            showRematchButtonInList = showRematchButtonInList
+            showRematchButtonInList = showRematchButtonInList,
+            highlightedVideoUri = highlightedVideoUri
         )
 
         LibraryLayoutMode.Grid -> VideoGridContent(
@@ -626,9 +783,27 @@ private fun VideoShelfContent(
             contentPadding = PaddingValues(8.dp),
             onOpenVideo = onOpenVideo,
             onMatchVideo = onMatchVideo,
-            onPlayVideo = onPlayVideo
+            onPlayVideo = onPlayVideo,
+            highlightedVideoUri = highlightedVideoUri
         )
     }
+}
+
+@Composable
+private fun animatedHighlightColor(
+    highlighted: Boolean
+): Color {
+    val targetColor = if (highlighted) {
+        MaterialTheme.colorScheme.primaryContainer
+    } else {
+        Color.Transparent
+    }
+    val color by animateColorAsState(
+        targetValue = targetColor,
+        animationSpec = tween(durationMillis = HighlightFadeMillis),
+        label = "itemHighlight"
+    )
+    return color
 }
 
 @OptIn(ExperimentalLayoutApi::class)

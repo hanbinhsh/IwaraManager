@@ -28,6 +28,8 @@ data class LibraryUiState(
     val currentDirectoryPath: String = "",
     val directoryFolders: List<LibraryFolderNode> = emptyList(),
     val directoryVideos: List<VideoItem> = emptyList(),
+    val directoryContentVersion: Long = 0L,
+    val directoryScrollToken: Long = 0L,
 
     val layoutMode: LibraryLayoutMode = LibraryLayoutMode.Grid,
     val gridColumns: Int = 2,

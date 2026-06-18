@@ -23,7 +23,8 @@ data class LibrarySource(
     val connectTimeoutSeconds: Int = 15,
     val readTimeoutSeconds: Int = 30,
     val createdAt: Long = 0L,
-    val updatedAt: Long = 0L
+    val updatedAt: Long = 0L,
+    val lastCompletedScanAt: Long? = null
 ) {
     val isRemote: Boolean
         get() = type == LibrarySourceType.WebDav

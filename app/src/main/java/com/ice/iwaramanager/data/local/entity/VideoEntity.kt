@@ -57,6 +57,7 @@ data class VideoEntity(
     val remoteCommentCount: Int? = null,
     val remoteRawJson: String? = null,
     val matchStatus: String = "unmatched",
+    val lastSeenAt: Long? = null,
 
     val createdAt: Long,
     val updatedAt: Long

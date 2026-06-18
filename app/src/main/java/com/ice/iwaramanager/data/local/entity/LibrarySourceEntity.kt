@@ -28,7 +28,8 @@ data class LibrarySourceEntity(
     val connectTimeoutSeconds: Int,
     val readTimeoutSeconds: Int,
     val createdAt: Long,
-    val updatedAt: Long
+    val updatedAt: Long,
+    val lastCompletedScanAt: Long?
 )
 
 fun LibrarySourceEntity.toLibrarySource(): LibrarySource {
@@ -45,7 +46,8 @@ fun LibrarySourceEntity.toLibrarySource(): LibrarySource {
         connectTimeoutSeconds = connectTimeoutSeconds,
         readTimeoutSeconds = readTimeoutSeconds,
         createdAt = createdAt,
-        updatedAt = updatedAt
+        updatedAt = updatedAt,
+        lastCompletedScanAt = lastCompletedScanAt
     )
 }
 
@@ -63,6 +65,7 @@ fun LibrarySource.toEntity(): LibrarySourceEntity {
         connectTimeoutSeconds = connectTimeoutSeconds,
         readTimeoutSeconds = readTimeoutSeconds,
         createdAt = createdAt,
-        updatedAt = updatedAt
+        updatedAt = updatedAt,
+        lastCompletedScanAt = lastCompletedScanAt
     )
 }

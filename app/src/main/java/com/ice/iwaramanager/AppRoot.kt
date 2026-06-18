@@ -76,6 +76,14 @@ fun AppRoot(
         mutableStateOf(MainTab.Library)
     }
 
+    val pendingDetailVideoUri = remember {
+        mutableStateOf<String?>(null)
+    }
+
+    val highlightedVideoUri = remember {
+        mutableStateOf<String?>(null)
+    }
+
     // 在不同路由间切换时保留各屏幕的可保存状态（如列表滚动位置），
     // 这样从详情页返回时库列表会停在原来的位置而不是回到顶部。
     val saveableStateHolder = rememberSaveableStateHolder()
@@ -118,6 +126,13 @@ fun AppRoot(
         }
     }
 
+    fun backToLibraryFromDetailWithHighlight() {
+        highlightedVideoUri.value = detailState.video?.uriString ?: pendingDetailVideoUri.value
+        pendingDetailVideoUri.value = null
+        selectedTab.value = tabBeforeDetail.value
+        currentRoute.value = Routes.Library
+    }
+
     fun playVideo(video: VideoItem, sourceRoute: String) {
         when (settingsState.videoOpenMode) {
             VideoOpenMode.InApp -> {
@@ -152,8 +167,7 @@ fun AppRoot(
             }
 
             Routes.Detail -> {
-                selectedTab.value = tabBeforeDetail.value
-                currentRoute.value = Routes.Library
+                backToLibraryFromDetailWithHighlight()
             }
 
             Routes.Settings -> {
@@ -181,6 +195,10 @@ fun AppRoot(
                 selectedTab = selectedTab.value,
                 tabReselectTick = tabReselectTick.value,
                 showRematchButtonInList = settingsState.showRematchButtonInList,
+                highlightedVideoUri = highlightedVideoUri.value,
+                onHighlightedVideoConsumed = {
+                    highlightedVideoUri.value = null
+                },
                 onSelectTab = ::openMainTab,
                 onSourceScopeChange = viewModel::selectSourceScope,
                 onOpenDirectory = viewModel::openDirectory,
@@ -211,6 +229,7 @@ fun AppRoot(
                 onStartBatchMatch = viewModel::startBatchMatchUnmatched,
                 onStartBatchRematch = viewModel::startBatchRematchMatched,
                 onOpenVideo = { video ->
+                    pendingDetailVideoUri.value = video.uriString
                     viewModel.openVideoDetail(video)
                     tabBeforeDetail.value = selectedTab.value
                     currentRoute.value = Routes.Detail
@@ -238,6 +257,7 @@ fun AppRoot(
                 onRescan = viewModel::rescanLibrary,
                 onClearDatabase = viewModel::clearDatabase,
                 onClearFolder = viewModel::clearLibraryFolder,
+                onCleanupMissingRecords = viewModel::cleanupMissingFromConfiguredSources,
                 onExportDatabase = {
                     databaseExporter.launch(defaultDatabaseFileName())
                 },
@@ -296,22 +316,24 @@ fun AppRoot(
             DetailScreen(
                 state = detailState,
                 onBack = {
-                    selectedTab.value = tabBeforeDetail.value
-                    currentRoute.value = Routes.Library
+                    backToLibraryFromDetailWithHighlight()
                 },
                 onPlay = { video ->
                     playVideo(video, Routes.Detail)
                 },
                 onMatch = { video ->
+                    pendingDetailVideoUri.value = null
                     viewModel.openMatchVideo(video)
                     currentRoute.value = Routes.Match
                 },
                 onTagClick = { tagKey ->
+                    pendingDetailVideoUri.value = null
                     viewModel.openTagFilterFromDetail(tagKey)
                     selectedTab.value = MainTab.Filters
                     currentRoute.value = Routes.Library
                 },
                 onAuthorClick = { authorKey ->
+                    pendingDetailVideoUri.value = null
                     viewModel.openAuthorFilterFromDetail(authorKey)
                     selectedTab.value = MainTab.Filters
                     currentRoute.value = Routes.Library

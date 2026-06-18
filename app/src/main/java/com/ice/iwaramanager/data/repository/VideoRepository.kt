@@ -426,7 +426,6 @@ class VideoRepository(context: Context) {
             )
         }
 
-        val seenUris = mutableSetOf<String>()
         val buffer = mutableListOf<VideoEntity>()
 
         // 边扫边存：每累积一批就立即写入数据库，扫描中途失败/闪退也能保留已扫描的数据。
@@ -437,7 +436,6 @@ class VideoRepository(context: Context) {
         }
 
         val onVideo: suspend (ScannedVideo) -> Unit = { scannedVideo ->
-            seenUris += scannedVideo.uriString
             buffer += mergeScannedVideo(scannedVideo, oldEntities[scannedVideo.uriString], source, now)
             if (buffer.size >= SCAN_FLUSH_BATCH_SIZE) flush()
         }
@@ -450,7 +448,7 @@ class VideoRepository(context: Context) {
         }
         flush()
 
-        // 扫描成功完成后：更新目录树、删除已不存在的视频、刷新来源时间戳。
+        // 扫描成功完成后只更新目录树和来源扫描时间；缺失记录由用户手动清理。
         db.withTransaction {
             sourceDao.deleteFoldersForSource(source.id)
             val folderEntities = folders.map {
@@ -464,9 +462,12 @@ class VideoRepository(context: Context) {
                 )
             }
             if (folderEntities.isNotEmpty()) sourceDao.upsertFolders(folderEntities)
-            val removedUris = oldEntities.keys - seenUris
-            removedUris.chunked(500).forEach { videoDao.deleteByUris(it) }
-            sourceDao.upsertSource(source.copy(updatedAt = now).toEntity())
+            sourceDao.upsertSource(
+                source.copy(
+                    updatedAt = now,
+                    lastCompletedScanAt = now
+                ).toEntity()
+            )
         }
     }
 
@@ -517,6 +518,7 @@ class VideoRepository(context: Context) {
             remoteCommentCount = old?.remoteCommentCount,
             remoteRawJson = old?.remoteRawJson,
             matchStatus = old?.matchStatus ?: "unmatched",
+            lastSeenAt = now,
             createdAt = old?.createdAt ?: now,
             updatedAt = old?.updatedAt ?: now
         )
@@ -640,6 +642,50 @@ class VideoRepository(context: Context) {
 
     suspend fun clearRoot(libraryRootUriString: String) {
         videoDao.deleteByRoot(libraryRootUriString)
+    }
+
+    suspend fun cleanupMissingFromConfiguredSources(sourceIds: List<String>): Int = withContext(Dispatchers.IO) {
+        val configuredSources = sourceDao.getSources().map { it.toLibrarySource() }
+        val configuredIds = configuredSources.map { it.id }
+        val targetSources = if (sourceIds.isEmpty()) {
+            configuredSources
+        } else {
+            configuredSources.filter { it.id in sourceIds }
+        }
+
+        var deletedCount = 0
+        for (source in targetSources) {
+            val missingUris = videoDao.getVideoUrisMissingFromLastScan(
+                sourceId = source.id,
+                lastCompletedScanAt = source.lastCompletedScanAt
+            )
+            deletedCount += deleteVideoRecords(missingUris)
+        }
+
+        if (sourceIds.isEmpty() && configuredIds.isNotEmpty()) {
+            val orphanUris = videoDao.getVideoUrisOutsideSourceIds(
+                sourceIds = configuredIds,
+                sourceCount = configuredIds.size
+            )
+            deletedCount += deleteVideoRecords(orphanUris)
+        }
+
+        deletedCount
+    }
+
+    private suspend fun deleteVideoRecords(uriStrings: List<String>): Int {
+        if (uriStrings.isEmpty()) return 0
+        var deleted = 0
+        uriStrings.distinct().chunked(300).forEach { chunk ->
+            db.withTransaction {
+                tagDao.deleteTagsForVideos(chunk)
+                matchTaskDao.deleteCandidatesForVideos(chunk)
+                matchTaskDao.deleteTasksForVideos(chunk)
+                videoDao.deleteByUris(chunk)
+            }
+            deleted += chunk.size
+        }
+        return deleted
     }
 
     suspend fun exportDatabaseTo(uri: Uri) = withContext(Dispatchers.IO) {

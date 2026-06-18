@@ -28,7 +28,7 @@ import com.ice.iwaramanager.data.local.entity.VideoTagEntity
         LibrarySourceEntity::class,
         LibraryFolderEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -48,7 +48,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "iwara_manager.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                     .build()
                     .also { INSTANCE = it }
             }
@@ -131,6 +131,15 @@ abstract class AppDatabase : RoomDatabase() {
         private val MIGRATION_4_5 = object : Migration(4, 5) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE library_source ADD COLUMN webDavAllowInsecureTls INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        private val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE video ADD COLUMN lastSeenAt INTEGER")
+                db.execSQL("UPDATE video SET lastSeenAt = updatedAt WHERE lastSeenAt IS NULL")
+                db.execSQL("ALTER TABLE library_source ADD COLUMN lastCompletedScanAt INTEGER")
+                db.execSQL("UPDATE library_source SET lastCompletedScanAt = updatedAt WHERE lastCompletedScanAt IS NULL")
             }
         }
     }

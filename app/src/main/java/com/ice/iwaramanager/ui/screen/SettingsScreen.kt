@@ -60,6 +60,7 @@ fun SettingsScreen(
     onRescan: () -> Unit,
     onClearDatabase: () -> Unit,
     onClearFolder: () -> Unit,
+    onCleanupMissingRecords: () -> Unit,
     onExportDatabase: () -> Unit,
     onImportDatabase: () -> Unit,
     onWebDavNameChange: (String) -> Unit,
@@ -103,6 +104,7 @@ fun SettingsScreen(
 ) {
     var showClearDatabaseDialog by remember { mutableStateOf(false) }
     var showClearFolderDialog by remember { mutableStateOf(false) }
+    var showCleanupMissingDialog by remember { mutableStateOf(false) }
     var showAddSourceDialog by remember { mutableStateOf(false) }
     var showWebDavDialog by remember { mutableStateOf(false) }
     var localSourceToRename by remember { mutableStateOf<LibrarySource?>(null) }
@@ -130,6 +132,17 @@ fun SettingsScreen(
         onConfirm = {
             showClearFolderDialog = false
             onClearFolder()
+        }
+    )
+    ConfirmDialog(
+        visible = showCleanupMissingDialog,
+        title = "清理缺失记录？",
+        text = "只会删除当前来源范围最近成功扫描未见到的视频记录，以及对应标签、任务和候选；不会删除视频文件。",
+        confirmText = "确认清理",
+        onDismiss = { showCleanupMissingDialog = false },
+        onConfirm = {
+            showCleanupMissingDialog = false
+            onCleanupMissingRecords()
         }
     )
     AddSourceDialog(
@@ -206,6 +219,7 @@ fun SettingsScreen(
                     onShowAddSourceDialog = { showAddSourceDialog = true },
                     onRescan = onRescan,
                     onClearFolder = { showClearFolderDialog = true },
+                    onCleanupMissingRecords = { showCleanupMissingDialog = true },
                     onScanSource = onScanSource,
                     onEditSource = { source ->
                         if (source.type == LibrarySourceType.WebDav) {
@@ -457,6 +471,7 @@ private fun DirectorySettings(
     onShowAddSourceDialog: () -> Unit,
     onRescan: () -> Unit,
     onClearFolder: () -> Unit,
+    onCleanupMissingRecords: () -> Unit,
     onScanSource: (String) -> Unit,
     onEditSource: (LibrarySource) -> Unit,
     onDeleteSource: (String) -> Unit
@@ -494,12 +509,22 @@ private fun DirectorySettings(
     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
     ListItem(
         headlineContent = { Text("重新扫描当前来源范围") },
-        supportingContent = { Text("按主页当前选择的来源范围重新扫描。") },
+        supportingContent = { Text("按主页当前选择的来源范围重新扫描；扫描不会自动删除缺失记录。") },
         trailingContent = {
             Button(
                 onClick = onRescan,
                 enabled = state.librarySources.isNotEmpty() && !state.isScanning
             ) { Text(if (state.isScanning) "扫描中" else "扫描") }
+        }
+    )
+    ListItem(
+        headlineContent = { Text("清理缺失记录") },
+        supportingContent = { Text("删除当前来源范围最近成功扫描未见到的视频记录，不删除视频文件。") },
+        trailingContent = {
+            TextButton(
+                onClick = onCleanupMissingRecords,
+                enabled = state.librarySources.isNotEmpty() && !state.isScanning
+            ) { Text("清理") }
         }
     )
     ListItem(

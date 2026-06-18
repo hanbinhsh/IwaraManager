@@ -1,5 +1,7 @@
 package com.ice.iwaramanager.ui.screen
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -22,19 +24,24 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import com.ice.iwaramanager.data.model.VideoItem
 import java.io.File
+
+private const val HighlightFadeMillis = 450
 
 @Composable
 fun VideoListContent(
@@ -44,7 +51,8 @@ fun VideoListContent(
     onOpenVideo: (VideoItem) -> Unit,
     onMatchVideo: (VideoItem) -> Unit,
     onPlayVideo: (VideoItem) -> Unit,
-    showRematchButtonInList: Boolean = true
+    showRematchButtonInList: Boolean = true,
+    highlightedVideoUri: String? = null
 ) {
     LazyColumn(
         state = listState,
@@ -65,7 +73,8 @@ fun VideoListContent(
                 onMatch = {
                     onMatchVideo(video)
                 },
-                showRematchButton = video.matchedIwaraId == null || showRematchButtonInList
+                showRematchButton = video.matchedIwaraId == null || showRematchButtonInList,
+                highlighted = highlightedVideoUri == video.uriString
             )
         }
     }
@@ -79,7 +88,8 @@ fun VideoGridContent(
     contentPadding: PaddingValues,
     onOpenVideo: (VideoItem) -> Unit,
     onMatchVideo: (VideoItem) -> Unit,
-    onPlayVideo: (VideoItem) -> Unit
+    onPlayVideo: (VideoItem) -> Unit,
+    highlightedVideoUri: String? = null
 ) {
     LazyVerticalGrid(
         state = gridState,
@@ -94,6 +104,7 @@ fun VideoGridContent(
         ) { video ->
             VideoGridItem(
                 video = video,
+                highlighted = highlightedVideoUri == video.uriString,
                 onClick = {
                     onOpenVideo(video)
                 }
@@ -108,9 +119,15 @@ private fun VideoListItem(
     onClick: () -> Unit,
     onPlay: () -> Unit,
     onMatch: () -> Unit,
-    showRematchButton: Boolean
+    showRematchButton: Boolean,
+    highlighted: Boolean
 ) {
+    val containerColor = animatedHighlightColor(highlighted)
+
     ListItem(
+        colors = ListItemDefaults.colors(
+            containerColor = containerColor
+        ),
         leadingContent = {
             VideoCover(
                 video = video,
@@ -151,8 +168,11 @@ private fun VideoListItem(
 @Composable
 private fun VideoGridItem(
     video: VideoItem,
+    highlighted: Boolean,
     onClick: () -> Unit
 ) {
+    val overlayColor = animatedHighlightOverlayColor(highlighted)
+
     androidx.compose.foundation.layout.Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -165,7 +185,47 @@ private fun VideoGridItem(
             video = video,
             modifier = Modifier.fillMaxSize()
         )
+
+        androidx.compose.foundation.layout.Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(overlayColor)
+        )
     }
+}
+
+@Composable
+private fun animatedHighlightColor(
+    highlighted: Boolean
+): Color {
+    val targetColor = if (highlighted) {
+        MaterialTheme.colorScheme.primaryContainer
+    } else {
+        Color.Transparent
+    }
+    val color by animateColorAsState(
+        targetValue = targetColor,
+        animationSpec = tween(durationMillis = HighlightFadeMillis),
+        label = "videoHighlight"
+    )
+    return color
+}
+
+@Composable
+private fun animatedHighlightOverlayColor(
+    highlighted: Boolean
+): Color {
+    val targetColor = if (highlighted) {
+        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.58f)
+    } else {
+        Color.Transparent
+    }
+    val color by animateColorAsState(
+        targetValue = targetColor,
+        animationSpec = tween(durationMillis = HighlightFadeMillis),
+        label = "videoHighlightOverlay"
+    )
+    return color
 }
 
 @Composable

@@ -31,6 +31,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -254,6 +255,7 @@ class AppViewModel(
     private var observeFilteredJob: Job? = null
     private var observeDirectoryFoldersJob: Job? = null
     private var observeDirectoryVideosJob: Job? = null
+    private var shouldScrollDirectoryToTop: Boolean = false
     private var observeCountsJob: Job? = null
     private var observeTasksJob: Job? = null
     private var observeTaskCountsJob: Job? = null
@@ -304,6 +306,7 @@ class AppViewModel(
                 }
                 _searchState.update { it.copy(folderUriString = source.id, error = null) }
                 _settingsState.update { it.copy(folderUriString = source.rootUriString, error = null) }
+                shouldScrollDirectoryToTop = true
                 scanSource(source.id)
             }.onFailure { error ->
                 _settingsState.update { it.copy(error = error.message ?: "添加目录失败") }
@@ -335,6 +338,7 @@ class AppViewModel(
             )
         }
         _searchState.update { it.copy(folderUriString = selected.key) }
+        shouldScrollDirectoryToTop = true
         observeLibrary()
         observeFiltersAndTasks()
         observeSearchIfNeeded()
@@ -348,6 +352,7 @@ class AppViewModel(
                 currentDirectoryPath = folder.path
             )
         }
+        shouldScrollDirectoryToTop = true
         observeDirectory()
     }
 
@@ -832,6 +837,7 @@ class AppViewModel(
                             currentDirectoryPath = ""
                         )
                     }
+                    shouldScrollDirectoryToTop = true
                     scanSource(source.id)
                     source to false
                 } else {
@@ -1461,6 +1467,29 @@ class AppViewModel(
         }
     }
 
+    fun cleanupMissingFromConfiguredSources() {
+        viewModelScope.launch {
+            runCatching {
+                videoRepository.cleanupMissingFromConfiguredSources(currentSourceIds())
+            }.onSuccess { count ->
+                _settingsState.update {
+                    it.copy(message = "已清理 $count 条缺失记录", error = null)
+                }
+                observeLibrary()
+                observeFiltersAndTasks()
+                observeSearchIfNeeded()
+                observeDirectory()
+            }.onFailure { error ->
+                _settingsState.update {
+                    it.copy(
+                        message = null,
+                        error = "清理缺失记录失败：${error.message ?: error::class.java.simpleName}"
+                    )
+                }
+            }
+        }
+    }
+
     private fun observeSources() {
         observeSourcesJob?.cancel()
         observeSourcesJob = viewModelScope.launch {
@@ -1641,18 +1670,50 @@ class AppViewModel(
                         name = source.name
                     )
                 }
-            _libraryState.update { it.copy(directoryFolders = folders, directoryVideos = emptyList(), currentDirectorySourceId = null, currentDirectoryPath = "") }
+            val requestScroll = shouldScrollDirectoryToTop
+            if (requestScroll) {
+                shouldScrollDirectoryToTop = false
+            }
+            _libraryState.update {
+                it.copy(
+                    directoryFolders = folders,
+                    directoryVideos = emptyList(),
+                    currentDirectorySourceId = null,
+                    currentDirectoryPath = "",
+                    directoryContentVersion = it.directoryContentVersion + 1L,
+                    directoryScrollToken = if (requestScroll) {
+                        it.directoryScrollToken + 1L
+                    } else {
+                        it.directoryScrollToken
+                    }
+                )
+            }
             return
         }
         val path = state.currentDirectoryPath
         observeDirectoryFoldersJob = viewModelScope.launch {
-            videoRepository.observeChildFolders(concreteSourceId, path).collectLatest { folders ->
-                _libraryState.update { it.copy(directoryFolders = folders) }
-            }
-        }
-        observeDirectoryVideosJob = viewModelScope.launch {
-            videoRepository.observeVideosInFolder(concreteSourceId, path).collectLatest { videos ->
-                _libraryState.update { it.copy(directoryVideos = videos) }
+            combine(
+                videoRepository.observeChildFolders(concreteSourceId, path),
+                videoRepository.observeVideosInFolder(concreteSourceId, path)
+            ) { folders, videos ->
+                folders to videos
+            }.collectLatest { (folders, videos) ->
+                val requestScroll = shouldScrollDirectoryToTop
+                if (requestScroll) {
+                    shouldScrollDirectoryToTop = false
+                }
+                _libraryState.update {
+                    it.copy(
+                        directoryFolders = folders,
+                        directoryVideos = videos,
+                        directoryContentVersion = it.directoryContentVersion + 1L,
+                        directoryScrollToken = if (requestScroll) {
+                            it.directoryScrollToken + 1L
+                        } else {
+                            it.directoryScrollToken
+                        }
+                    )
+                }
             }
         }
     }

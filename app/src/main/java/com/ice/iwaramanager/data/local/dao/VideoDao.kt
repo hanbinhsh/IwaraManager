@@ -319,6 +319,27 @@ interface VideoDao {
     @Query("SELECT * FROM video WHERE libraryRootUriString = :libraryRootUriString")
     suspend fun findAllByRoot(libraryRootUriString: String): List<VideoEntity>
 
+    @Query(
+        """
+        SELECT uriString
+        FROM video
+        WHERE sourceId = :sourceId
+        AND :lastCompletedScanAt IS NOT NULL
+        AND (lastSeenAt IS NULL OR lastSeenAt < :lastCompletedScanAt)
+        """
+    )
+    suspend fun getVideoUrisMissingFromLastScan(sourceId: String, lastCompletedScanAt: Long?): List<String>
+
+    @Query(
+        """
+        SELECT uriString
+        FROM video
+        WHERE :sourceCount > 0
+        AND sourceId NOT IN (:sourceIds)
+        """
+    )
+    suspend fun getVideoUrisOutsideSourceIds(sourceIds: List<String>, sourceCount: Int): List<String>
+
     @Query("SELECT * FROM video WHERE uriString = :uriString LIMIT 1")
     suspend fun findByUri(uriString: String): VideoEntity?
 
