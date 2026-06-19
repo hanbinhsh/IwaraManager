@@ -38,6 +38,7 @@ data class IwaraSearchMetaResult(
 
 data class IwaraMatchNetworkOptions(
     val apiEndpointTemplates: List<String> = IwaraMatchNetworkDefaults.apiEndpointTemplates,
+    val apiRequestHeaders: Map<String, String> = IwaraMatchNetworkDefaults.apiRequestHeaders,
     val apiProbeTimeoutMillis: Long = 30_000L,
     val allowPageFallback: Boolean = false,
     val fetchSearchResultDetailsWithApi: Boolean = true,
@@ -45,9 +46,25 @@ data class IwaraMatchNetworkOptions(
 )
 
 object IwaraMatchNetworkDefaults {
-    val apiEndpointTemplates: List<String> = listOf(
+    val legacyApiEndpointTemplates: List<String> = listOf(
         "https://api.iwara.tv/video/{id}"
     )
+
+    val apiEndpointTemplates: List<String> = listOf(
+        "https://api.iwara.tv/video/{id}",
+        "https://api.iwara.tv/videos/{id}",
+        "https://api.iwara.tv/video/{id}?rating=all",
+        "https://api.iwara.tv/videos/{id}?rating=all"
+    )
+
+    val apiRequestHeaders: Map<String, String> = linkedMapOf(
+        "accept" to "application/json, text/plain, */*",
+        "x-version" to "5"
+    )
+
+    val apiRequestHeadersText: String = apiRequestHeaders.entries.joinToString("\n") { (key, value) ->
+        "$key: $value"
+    }
 }
 
 data class IwaraMatchCandidate(

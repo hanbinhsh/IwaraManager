@@ -105,13 +105,18 @@ class AppViewModel(
         30
     ).coerceIn(5, 120)
 
-    private val initialApiEndpointTemplatesText = prefs.getString(
-        KEY_API_ENDPOINT_TEMPLATES,
-        IwaraMatchNetworkDefaults.apiEndpointTemplates.joinToString("\n")
-    ) ?: IwaraMatchNetworkDefaults.apiEndpointTemplates.joinToString("\n")
+    private val initialApiEndpointTemplatesText = normalizedInitialApiEndpointTemplatesText()
 
     private val initialApiEndpointTemplates = parseApiEndpointTemplates(initialApiEndpointTemplatesText)
         .ifEmpty { IwaraMatchNetworkDefaults.apiEndpointTemplates }
+
+    private val initialApiRequestHeadersText = prefs.getString(
+        KEY_API_REQUEST_HEADERS,
+        IwaraMatchNetworkDefaults.apiRequestHeadersText
+    ) ?: IwaraMatchNetworkDefaults.apiRequestHeadersText
+
+    private val initialApiRequestHeaders = parseApiRequestHeaders(initialApiRequestHeadersText)
+        .ifEmpty { IwaraMatchNetworkDefaults.apiRequestHeaders }
 
     private val initialAllowPageFallback = prefs.getBoolean(
         KEY_ALLOW_PAGE_FALLBACK,
@@ -217,6 +222,8 @@ class AppViewModel(
             apiProbeTimeoutSeconds = initialApiProbeTimeoutSeconds,
             apiEndpointTemplatesText = initialApiEndpointTemplatesText,
             apiEndpointTemplates = initialApiEndpointTemplates,
+            apiRequestHeadersText = initialApiRequestHeadersText,
+            apiRequestHeaders = initialApiRequestHeaders,
             allowPageFallback = initialAllowPageFallback,
             fetchSearchResultDetailsWithApi = initialFetchSearchResultDetailsWithApi,
             maxSearchApiDetailsText = initialMaxSearchApiDetails.toString(),
@@ -600,6 +607,34 @@ class AppViewModel(
             it.copy(
                 apiEndpointTemplatesText = text,
                 apiEndpointTemplates = IwaraMatchNetworkDefaults.apiEndpointTemplates
+            )
+        }
+    }
+
+    fun setApiRequestHeaders(raw: String) {
+        val headers = parseApiRequestHeaders(raw)
+        _settingsState.update {
+            if (headers.isEmpty()) {
+                it.copy(apiRequestHeadersText = raw)
+            } else {
+                prefs.edit().putString(KEY_API_REQUEST_HEADERS, raw).apply()
+                it.copy(
+                    apiRequestHeadersText = raw,
+                    apiRequestHeaders = headers
+                )
+            }
+        }
+    }
+
+    fun resetApiRequestHeaders() {
+        val text = IwaraMatchNetworkDefaults.apiRequestHeadersText
+        prefs.edit()
+            .putString(KEY_API_REQUEST_HEADERS, text)
+            .apply()
+        _settingsState.update {
+            it.copy(
+                apiRequestHeadersText = text,
+                apiRequestHeaders = IwaraMatchNetworkDefaults.apiRequestHeaders
             )
         }
     }
@@ -2045,11 +2080,24 @@ class AppViewModel(
         val templates = state.apiEndpointTemplates.ifEmpty { IwaraMatchNetworkDefaults.apiEndpointTemplates }
         return IwaraMatchNetworkOptions(
             apiEndpointTemplates = templates,
+            apiRequestHeaders = state.apiRequestHeaders.ifEmpty { IwaraMatchNetworkDefaults.apiRequestHeaders },
             apiProbeTimeoutMillis = state.apiProbeTimeoutSeconds * 1000L,
             allowPageFallback = state.allowPageFallback,
             fetchSearchResultDetailsWithApi = state.fetchSearchResultDetailsWithApi,
             maxSearchApiDetails = state.maxSearchApiDetails
         )
+    }
+
+    private fun normalizedInitialApiEndpointTemplatesText(): String {
+        val defaultText = IwaraMatchNetworkDefaults.apiEndpointTemplates.joinToString("\n")
+        val stored = prefs.getString(KEY_API_ENDPOINT_TEMPLATES, null) ?: return defaultText
+        val parsed = parseApiEndpointTemplates(stored)
+        return if (parsed == IwaraMatchNetworkDefaults.legacyApiEndpointTemplates) {
+            prefs.edit().putString(KEY_API_ENDPOINT_TEMPLATES, defaultText).apply()
+            defaultText
+        } else {
+            stored
+        }
     }
 
     private fun parseApiEndpointTemplates(raw: String): List<String> {
@@ -2060,6 +2108,27 @@ class AppViewModel(
             .filter { it.contains("{id}") }
             .distinct()
             .take(12)
+    }
+
+    private fun parseApiRequestHeaders(raw: String): Map<String, String> {
+        return raw
+            .lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotBlank() && !it.startsWith("#") }
+            .mapNotNull { line ->
+                val separator = line.indexOf(':')
+                if (separator <= 0) return@mapNotNull null
+                val name = line.substring(0, separator).trim()
+                val value = line.substring(separator + 1).trim()
+                if (!name.matches(Regex("[A-Za-z0-9-]+")) || value.isBlank()) {
+                    null
+                } else {
+                    name to value
+                }
+            }
+            .distinctBy { it.first.lowercase() }
+            .take(24)
+            .toMap(linkedMapOf())
     }
 
     private fun normalizeIwaraId(value: String): String? {
@@ -2153,6 +2222,7 @@ class AppViewModel(
         const val KEY_MATCH_SEARCH_TIMEOUT_SECONDS = "match_search_timeout_seconds"
         const val KEY_API_PROBE_TIMEOUT_SECONDS = "api_probe_timeout_seconds"
         const val KEY_API_ENDPOINT_TEMPLATES = "api_endpoint_templates"
+        const val KEY_API_REQUEST_HEADERS = "api_request_headers"
         const val KEY_ALLOW_PAGE_FALLBACK = "allow_page_fallback"
         const val KEY_FETCH_SEARCH_RESULT_DETAILS_WITH_API = "fetch_search_result_details_with_api"
         const val KEY_MAX_SEARCH_API_DETAILS = "max_search_api_details"

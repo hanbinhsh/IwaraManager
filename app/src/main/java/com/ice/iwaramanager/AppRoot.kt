@@ -301,6 +301,8 @@ fun AppRoot(
                 onApiProbeTimeoutSecondsChange = viewModel::setApiProbeTimeoutSeconds,
                 onApiEndpointTemplatesChange = viewModel::setApiEndpointTemplates,
                 onResetApiEndpointTemplates = viewModel::resetApiEndpointTemplates,
+                onApiRequestHeadersChange = viewModel::setApiRequestHeaders,
+                onResetApiRequestHeaders = viewModel::resetApiRequestHeaders,
                 onAllowPageFallbackChange = viewModel::setAllowPageFallback,
                 onFetchSearchResultDetailsWithApiChange = viewModel::setFetchSearchResultDetailsWithApi,
                 onMaxSearchApiDetailsChange = viewModel::setMaxSearchApiDetails,

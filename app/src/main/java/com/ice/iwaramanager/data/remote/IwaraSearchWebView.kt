@@ -75,6 +75,7 @@ class IwaraSearchWebView(
             val effectiveApiEndpointTemplates =
                 options.apiEndpointTemplates.ifEmpty { IwaraMatchNetworkOptions().apiEndpointTemplates }
             val apiEndpointTemplatesJson = JSONArray(effectiveApiEndpointTemplates).toString()
+            val apiRequestHeadersJson = JSONObject(options.apiRequestHeaders).toString()
             val apiProbeTimeoutMillis = options.apiProbeTimeoutMillis.coerceIn(5_000L, 120_000L)
             val allowPageFallback = options.allowPageFallback
 
@@ -860,6 +861,11 @@ class IwaraSearchWebView(
                         emptyList()
                     }
                     val hasStructuredVideo = pageResults.isNotEmpty() || currentStructuredResult != null
+                    val apiProbeErrors = payload.optJSONArray("apiProbeErrors") ?: JSONArray()
+                    val apiAllNotFound = apiProbeErrors.length() > 0 &&
+                        (0 until apiProbeErrors.length()).all { index ->
+                            apiProbeErrors.optString(index).contains("HTTP 404", ignoreCase = true)
+                        }
                     val resultObjects = if (
                         (pageError && !hasStructuredVideo) ||
                         cloudflare ||
@@ -906,6 +912,7 @@ class IwaraSearchWebView(
 
                     val failureReason = when {
                         ids.isNotEmpty() -> null
+                        pageError && apiAllNotFound -> "Iwara 返回错误页面，API 也返回 404（可能视频已删除、设为私密，或 API 端点/Header 配置不匹配）"
                         pageError -> "Iwara 返回错误页面"
                         timedOut -> "Iwara 页面超时（${timeoutMillis / 1000} 秒）"
                         loading && ids.isEmpty() -> "Iwara 页面仍停留在 Loading，未提取到有效视频"
@@ -928,6 +935,7 @@ class IwaraSearchWebView(
                         .put("timedOut", timedOut)
                         .put("timeoutMillis", timeoutMillis)
                         .put("apiEndpointTemplates", JSONArray(effectiveApiEndpointTemplates))
+                        .put("apiRequestHeaderNames", JSONArray(options.apiRequestHeaders.keys))
                         .put("allowPageFallback", allowPageFallback)
                         .put("lastError", lastError)
                         .put("cloudflare", cloudflare)
@@ -940,7 +948,7 @@ class IwaraSearchWebView(
                         .put("apiProbePendingMillis", payload.optLong("apiProbePendingMillis"))
                         .put("apiProbeTimeoutMillis", payload.optLong("apiProbeTimeoutMillis"))
                         .put("apiProbeDone", payload.optBoolean("apiProbeDone"))
-                        .put("apiProbeErrors", payload.optJSONArray("apiProbeErrors") ?: JSONArray())
+                        .put("apiProbeErrors", apiProbeErrors)
                         .put("apiProbeSummaries", payload.optJSONArray("apiProbeSummaries") ?: JSONArray())
                         .put("candidateIds", JSONArray(ids))
                         .put("results", JSONArray(resultObjects))
@@ -962,6 +970,9 @@ class IwaraSearchWebView(
                                     val apiProbeState = if (payload.optBoolean("apiProbeDone")) "完成" else "等待中"
                                     append("；API探测:$apiProbeState")
                                     append("；API等待:${payload.optLong("apiProbePendingMillis")}ms")
+                                    if (apiProbeErrors.length() > 0) {
+                                        append("；API错误:${apiProbeErrors.length()}个")
+                                    }
                                 }
                             }
                         )
@@ -999,6 +1010,7 @@ class IwaraSearchWebView(
                             var id = currentVideoId();
                             if (searchPage || !id || window.__iwaraManagerApiStarted) return;
                             var endpointTemplates = $apiEndpointTemplatesJson;
+                            var configuredHeaders = $apiRequestHeadersJson;
                             if (!Array.isArray(endpointTemplates) || endpointTemplates.length === 0) return;
                             window.__iwaraManagerApiStarted = true;
                             window.__iwaraManagerApiDone = false;
@@ -1016,6 +1028,19 @@ class IwaraSearchWebView(
                               return value && array.indexOf(value) === index;
                             });
                             if (!urls.length) return;
+                            function buildRequestHeaders() {
+                              var headers = {};
+                              var forbidden = /^(accept-charset|accept-encoding|access-control-request-headers|access-control-request-method|connection|content-length|cookie|date|dnt|expect|host|keep-alive|origin|permissions-policy|referer|set-cookie|te|trailer|transfer-encoding|upgrade|via)$/i;
+                              Object.keys(configuredHeaders || {}).forEach(function(name) {
+                                var value = configuredHeaders[name];
+                                if (!name || forbidden.test(name) || value == null || String(value).trim() === '') return;
+                                headers[name] = String(value);
+                              });
+                              if (!headers.accept && !headers.Accept) {
+                                headers.accept = 'application/json, text/plain, */*';
+                              }
+                              return headers;
+                            }
                             function summarize(apiUrl, parsed) {
                               var root = parsed && typeof parsed === 'object' ? parsed : {};
                               var data = root.data && typeof root.data === 'object' ? root.data : root;
@@ -1055,7 +1080,7 @@ class IwaraSearchWebView(
                               }, window.__iwaraManagerApiTimeoutMillis - 1000) : null;
                               fetch(apiUrl, {
                                 credentials: 'include',
-                                headers: { 'accept': 'application/json' },
+                                headers: buildRequestHeaders(),
                                 signal: controller ? controller.signal : undefined
                               }).then(function(response) {
                                 return response.text().then(function(body) {

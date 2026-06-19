@@ -85,6 +85,8 @@ data class SettingsUiState(
     val apiProbeTimeoutSeconds: Int = 30,
     val apiEndpointTemplatesText: String = IwaraMatchNetworkDefaults.apiEndpointTemplates.joinToString("\n"),
     val apiEndpointTemplates: List<String> = IwaraMatchNetworkDefaults.apiEndpointTemplates,
+    val apiRequestHeadersText: String = IwaraMatchNetworkDefaults.apiRequestHeadersText,
+    val apiRequestHeaders: Map<String, String> = IwaraMatchNetworkDefaults.apiRequestHeaders,
     val allowPageFallback: Boolean = false,
     val fetchSearchResultDetailsWithApi: Boolean = true,
     val maxSearchApiDetailsText: String = "10",

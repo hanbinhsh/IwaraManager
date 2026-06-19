@@ -93,6 +93,8 @@ fun SettingsScreen(
     onApiProbeTimeoutSecondsChange: (String) -> Unit,
     onApiEndpointTemplatesChange: (String) -> Unit,
     onResetApiEndpointTemplates: () -> Unit,
+    onApiRequestHeadersChange: (String) -> Unit,
+    onResetApiRequestHeaders: () -> Unit,
     onAllowPageFallbackChange: (Boolean) -> Unit,
     onFetchSearchResultDetailsWithApiChange: (Boolean) -> Unit,
     onMaxSearchApiDetailsChange: (String) -> Unit,
@@ -255,6 +257,8 @@ fun SettingsScreen(
                     onApiProbeTimeoutSecondsChange = onApiProbeTimeoutSecondsChange,
                     onApiEndpointTemplatesChange = onApiEndpointTemplatesChange,
                     onResetApiEndpointTemplates = onResetApiEndpointTemplates,
+                    onApiRequestHeadersChange = onApiRequestHeadersChange,
+                    onResetApiRequestHeaders = onResetApiRequestHeaders,
                     onAllowPageFallbackChange = onAllowPageFallbackChange,
                     onFetchSearchResultDetailsWithApiChange = onFetchSearchResultDetailsWithApiChange,
                     onMaxSearchApiDetailsChange = onMaxSearchApiDetailsChange,
@@ -638,6 +642,8 @@ private fun MatchSettings(
     onApiProbeTimeoutSecondsChange: (String) -> Unit,
     onApiEndpointTemplatesChange: (String) -> Unit,
     onResetApiEndpointTemplates: () -> Unit,
+    onApiRequestHeadersChange: (String) -> Unit,
+    onResetApiRequestHeaders: () -> Unit,
     onAllowPageFallbackChange: (Boolean) -> Unit,
     onFetchSearchResultDetailsWithApiChange: (Boolean) -> Unit,
     onMaxSearchApiDetailsChange: (String) -> Unit,
@@ -677,6 +683,20 @@ private fun MatchSettings(
             )
         },
         trailingContent = { TextButton(onClick = onResetApiEndpointTemplates) { Text("恢复默认") } }
+    )
+    ListItem(
+        headlineContent = { Text("API 请求 Header") },
+        supportingContent = {
+            OutlinedTextField(
+                value = state.apiRequestHeadersText,
+                onValueChange = onApiRequestHeadersChange,
+                minLines = 2,
+                maxLines = 6,
+                modifier = Modifier.fillMaxWidth(),
+                placeholder = { Text("accept: application/json\nx-version: 5") }
+            )
+        },
+        trailingContent = { TextButton(onClick = onResetApiRequestHeaders) { Text("恢复默认") } }
     )
     SwitchItem("标题搜索后按 ID 获取详情", "搜索页只负责提取候选 ID，详情字段从 ID/API 链路获取。", state.fetchSearchResultDetailsWithApi, onFetchSearchResultDetailsWithApiChange)
     SettingsNumberField("标题搜索详情数量", state.maxSearchApiDetailsText, onMaxSearchApiDetailsChange, "1-30")
