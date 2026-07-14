@@ -54,7 +54,6 @@ import com.ice.iwaramanager.MatchUiState
 import com.ice.iwaramanager.data.model.IwaraVideoMeta
 import com.ice.iwaramanager.data.model.VideoItem
 import java.io.File
-import kotlin.math.abs
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -272,7 +271,7 @@ private fun CandidateItem(
     onBind: () -> Unit
 ) {
     val context = LocalContext.current
-    val durationText = durationCompareText(localDurationMs, meta.durationSeconds)
+    val durationText = formatDurationComparison(localDurationMs, meta.durationSeconds)
     val durationMatched = durationMatched(localDurationMs, meta.durationSeconds)
     ListItem(
         headlineContent = {
@@ -280,7 +279,7 @@ private fun CandidateItem(
         },
         supportingContent = {
             Column {
-                val author = authorLabel(meta.authorName, meta.authorUsername)
+                val author = formatAuthorLabel(meta.authorName, meta.authorUsername)
                 val info = listOfNotNull(
                     author,
                     meta.rating,
@@ -339,45 +338,6 @@ private fun CandidateItem(
     )
 }
 
-private fun authorLabel(
-    authorName: String?,
-    authorUsername: String?
-): String? {
-    val name = authorName?.takeIf { it.isNotBlank() && it != authorUsername }
-    val username = authorUsername?.takeIf { it.isNotBlank() }
-    return when {
-        name != null && username != null -> "$name $username"
-        name != null -> name
-        username != null -> username
-        else -> null
-    }
-}
-
-private fun durationCompareText(
-    localDurationMs: Long?,
-    remoteDurationSeconds: Long?
-): String {
-    val local = localDurationMs?.takeIf { it > 0L }
-    val remote = remoteDurationSeconds?.takeIf { it > 0L }?.times(1000L)
-    return when {
-        local != null && remote != null -> {
-            val matched = durationMatched(localDurationMs, remoteDurationSeconds) == true
-            "时长${if (matched) "一致" else "不一致"}：本地 ${formatDuration(local)} / 候选 ${formatDuration(remote)}"
-        }
-        local != null -> "本地时长：${formatDuration(local)} / 候选时长：未知"
-        remote != null -> "本地时长：未知 / 候选 ${formatDuration(remote)}"
-        else -> "时长：未知"
-    }
-}
-
-private fun durationMatched(
-    localDurationMs: Long?,
-    remoteDurationSeconds: Long?
-): Boolean? {
-    val localSeconds = localDurationMs?.takeIf { it > 0L }?.div(1000L) ?: return null
-    val remoteSeconds = remoteDurationSeconds?.takeIf { it > 0L } ?: return null
-    return abs(localSeconds - remoteSeconds) <= 2L
-}
 
 @Composable
 private fun SearchDiagnostic(

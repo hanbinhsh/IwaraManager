@@ -49,6 +49,7 @@ import com.ice.iwaramanager.data.model.LibraryLayoutMode
 import com.ice.iwaramanager.data.model.LibrarySource
 import com.ice.iwaramanager.data.model.LibrarySourceType
 import com.ice.iwaramanager.data.model.RemoteIndexMode
+import com.ice.iwaramanager.data.model.SettingsTab
 import com.ice.iwaramanager.data.model.VideoOpenMode
 import com.ice.iwaramanager.data.model.VideoPlayerApp
 
@@ -118,8 +119,7 @@ fun SettingsScreen(
     var showWebDavDialog by remember { mutableStateOf(false) }
     var localSourceToRename by remember { mutableStateOf<LibrarySource?>(null) }
     var localSourceName by remember { mutableStateOf("") }
-    var selectedTab by rememberSaveable { mutableStateOf(0) }
-    val tabs = listOf("目录", "显示", "播放", "匹配", "数据库")
+    var selectedTab by rememberSaveable { mutableStateOf(SettingsTab.Directory) }
 
     ConfirmDialog(
         visible = showClearDatabaseDialog,
@@ -212,18 +212,18 @@ fun SettingsScreen(
                 .padding(paddingValues)
                 .verticalScroll(rememberScrollState())
         ) {
-            PrimaryTabRow(selectedTabIndex = selectedTab) {
-                tabs.forEachIndexed { index, title ->
+            PrimaryTabRow(selectedTabIndex = selectedTab.ordinal) {
+                SettingsTab.entries.forEach { tab ->
                     Tab(
-                        selected = selectedTab == index,
-                        onClick = { selectedTab = index },
-                        text = { Text(title) }
+                        selected = selectedTab == tab,
+                        onClick = { selectedTab = tab },
+                        text = { Text(settingsTabLabel(tab)) }
                     )
                 }
             }
 
             when (selectedTab) {
-                0 -> DirectorySettings(
+                SettingsTab.Directory -> DirectorySettings(
                     state = state,
                     onShowAddSourceDialog = { showAddSourceDialog = true },
                     onRescan = onRescan,
@@ -241,7 +241,7 @@ fun SettingsScreen(
                     },
                     onDeleteSource = onDeleteSource
                 )
-                1 -> DisplaySettings(
+                SettingsTab.Display -> DisplaySettings(
                     state = state,
                     onLayoutModeChange = onLayoutModeChange,
                     onGridColumnsChange = onGridColumnsChange,
@@ -249,7 +249,7 @@ fun SettingsScreen(
                     onOpenVideoDirectlyInPlayerChange = onOpenVideoDirectlyInPlayerChange,
                     onShowGridCoverPlayButtonChange = onShowGridCoverPlayButtonChange
                 )
-                2 -> PlaybackSettings(
+                SettingsTab.Playback -> PlaybackSettings(
                     state = state,
                     videoPlayerApps = videoPlayerApps,
                     onVideoOpenModeChange = onVideoOpenModeChange,
@@ -259,7 +259,7 @@ fun SettingsScreen(
                     onRemoteProxyReadTimeoutSecondsChange = onRemoteProxyReadTimeoutSecondsChange,
                     onShowRemotePlaybackDiagnosticsChange = onShowRemotePlaybackDiagnosticsChange
                 )
-                3 -> MatchSettings(
+                SettingsTab.Match -> MatchSettings(
                     state = state,
                     onOpenIwaraLogin = onOpenIwaraLogin,
                     onCheckIwaraLoginStatus = onCheckIwaraLoginStatus,
@@ -280,7 +280,7 @@ fun SettingsScreen(
                     onAutoMatchDurationToleranceSecondsChange = onAutoMatchDurationToleranceSecondsChange,
                     onAutoMatchSkipNoIdChange = onAutoMatchSkipNoIdChange
                 )
-                else -> DatabaseSettings(
+                SettingsTab.Database -> DatabaseSettings(
                     state = state,
                     onExportDatabase = onExportDatabase,
                     onImportDatabase = onImportDatabase,
@@ -290,6 +290,14 @@ fun SettingsScreen(
 
         }
     }
+}
+
+private fun settingsTabLabel(tab: SettingsTab): String = when (tab) {
+    SettingsTab.Directory -> "目录"
+    SettingsTab.Display -> "显示"
+    SettingsTab.Playback -> "播放"
+    SettingsTab.Match -> "匹配"
+    SettingsTab.Database -> "数据库"
 }
 
 @Composable
@@ -539,7 +547,7 @@ private fun DirectorySettings(
         trailingContent = {
             TextButton(
                 onClick = onCleanupMissingRecords,
-                enabled = state.librarySources.isNotEmpty() && !state.isScanning
+                enabled = !state.isScanning
             ) { Text("清理") }
         }
     )

@@ -9,9 +9,6 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface VideoDao {
-    @Query("SELECT * FROM video WHERE libraryRootUriString = :libraryRootUriString ORDER BY updatedAt DESC")
-    fun observeVideos(libraryRootUriString: String): Flow<List<VideoEntity>>
-
     @Query(
         """
         SELECT * FROM video
@@ -146,21 +143,6 @@ interface VideoDao {
                COALESCE(remoteAuthorName, remoteAuthorUsername, remoteAuthorId, '') AS label,
                COUNT(*) AS count
         FROM video
-        WHERE libraryRootUriString = :libraryRootUriString
-        AND matchedIwaraId IS NOT NULL
-        AND COALESCE(remoteAuthorUsername, remoteAuthorId, remoteAuthorName, '') != ''
-        GROUP BY itemKey, label
-        ORDER BY count DESC, label ASC
-        """
-    )
-    fun observeAuthorCounts(libraryRootUriString: String): Flow<List<CountItem>>
-
-    @Query(
-        """
-        SELECT COALESCE(remoteAuthorUsername, remoteAuthorId, remoteAuthorName, '') AS itemKey,
-               COALESCE(remoteAuthorName, remoteAuthorUsername, remoteAuthorId, '') AS label,
-               COUNT(*) AS count
-        FROM video
         WHERE (:sourceCount = 0 OR sourceId IN (:sourceIds))
         AND matchedIwaraId IS NOT NULL
         AND COALESCE(remoteAuthorUsername, remoteAuthorId, remoteAuthorName, '') != ''
@@ -169,19 +151,6 @@ interface VideoDao {
         """
     )
     fun observeAuthorCountsForSourceIds(sourceIds: List<String>, sourceCount: Int): Flow<List<CountItem>>
-
-    @Query(
-        """
-        SELECT COALESCE(quality, '未知') AS itemKey,
-               COALESCE(quality, '未知') AS label,
-               COUNT(*) AS count
-        FROM video
-        WHERE libraryRootUriString = :libraryRootUriString
-        GROUP BY itemKey, label
-        ORDER BY count DESC, label ASC
-        """
-    )
-    fun observeQualityCounts(libraryRootUriString: String): Flow<List<CountItem>>
 
     @Query(
         """
@@ -199,17 +168,6 @@ interface VideoDao {
     @Query(
         """
         SELECT * FROM video
-        WHERE libraryRootUriString = :libraryRootUriString
-        AND (matchedIwaraId IS NULL OR matchedIwaraId = '')
-        AND uriString NOT IN (SELECT videoUriString FROM match_task WHERE libraryRootUriString = :libraryRootUriString)
-        ORDER BY updatedAt DESC
-        """
-    )
-    fun observeUnqueuedUnmatchedVideos(libraryRootUriString: String): Flow<List<VideoEntity>>
-
-    @Query(
-        """
-        SELECT * FROM video
         WHERE (:sourceCount = 0 OR sourceId IN (:sourceIds))
         AND (matchedIwaraId IS NULL OR matchedIwaraId = '')
         AND uriString NOT IN (SELECT videoUriString FROM match_task WHERE (:sourceCount = 0 OR libraryRootUriString IN (:sourceIds)))
@@ -217,16 +175,6 @@ interface VideoDao {
         """
     )
     fun observeUnqueuedUnmatchedVideosForSourceIds(sourceIds: List<String>, sourceCount: Int): Flow<List<VideoEntity>>
-
-    @Query(
-        """
-        SELECT COUNT(*) FROM video
-        WHERE libraryRootUriString = :libraryRootUriString
-        AND (matchedIwaraId IS NULL OR matchedIwaraId = '')
-        AND uriString NOT IN (SELECT videoUriString FROM match_task WHERE libraryRootUriString = :libraryRootUriString)
-        """
-    )
-    fun observeUnqueuedUnmatchedVideoCount(libraryRootUriString: String): Flow<Int>
 
     @Query(
         """
@@ -241,17 +189,6 @@ interface VideoDao {
     @Query(
         """
         SELECT * FROM video
-        WHERE libraryRootUriString = :libraryRootUriString
-        AND (matchedIwaraId IS NULL OR matchedIwaraId = '')
-        AND uriString NOT IN (SELECT videoUriString FROM match_task WHERE libraryRootUriString = :libraryRootUriString)
-        ORDER BY updatedAt DESC
-        """
-    )
-    suspend fun getUnqueuedUnmatchedVideos(libraryRootUriString: String): List<VideoEntity>
-
-    @Query(
-        """
-        SELECT * FROM video
         WHERE (:sourceCount = 0 OR sourceId IN (:sourceIds))
         AND (matchedIwaraId IS NULL OR matchedIwaraId = '')
         AND uriString NOT IN (SELECT videoUriString FROM match_task WHERE (:sourceCount = 0 OR libraryRootUriString IN (:sourceIds)))
@@ -259,9 +196,6 @@ interface VideoDao {
         """
     )
     suspend fun getUnqueuedUnmatchedVideosForSourceIds(sourceIds: List<String>, sourceCount: Int): List<VideoEntity>
-
-    @Query("SELECT * FROM video WHERE libraryRootUriString = :libraryRootUriString AND matchedIwaraId IS NOT NULL AND matchedIwaraId != '' ORDER BY updatedAt DESC")
-    suspend fun getMatchedVideos(libraryRootUriString: String): List<VideoEntity>
 
     @Query(
         """
@@ -272,16 +206,6 @@ interface VideoDao {
         """
     )
     suspend fun getMatchedVideosForSourceIds(sourceIds: List<String>, sourceCount: Int): List<VideoEntity>
-
-    @Query(
-        """
-        SELECT * FROM video
-        WHERE libraryRootUriString = :libraryRootUriString
-        AND ((matchedIwaraId IS NOT NULL AND matchedIwaraId != '') OR (sourceVideoId IS NOT NULL AND sourceVideoId != ''))
-        ORDER BY updatedAt DESC
-        """
-    )
-    suspend fun getRematchableVideos(libraryRootUriString: String): List<VideoEntity>
 
     @Query(
         """
@@ -421,12 +345,6 @@ interface VideoDao {
 
     @Upsert
     suspend fun upsertAll(videos: List<VideoEntity>)
-
-    @Query("DELETE FROM video WHERE libraryRootUriString = :libraryRootUriString")
-    suspend fun deleteByRoot(libraryRootUriString: String)
-
-    @Query("DELETE FROM video WHERE sourceId = :sourceId")
-    suspend fun deleteBySource(sourceId: String)
 
     @Query("DELETE FROM video WHERE uriString IN (:uris)")
     suspend fun deleteByUris(uris: List<String>)

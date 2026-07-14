@@ -27,6 +27,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FastForward
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Sort
+import androidx.compose.material.icons.automirrored.filled.ViewList
 import androidx.compose.material.icons.filled.FilterAlt
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.ExpandMore
@@ -35,8 +37,6 @@ import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Sort
-import androidx.compose.material.icons.filled.ViewList
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
@@ -56,7 +56,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
+import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -289,7 +289,7 @@ fun LibraryScreen(
                 actions = {
                     Box {
                         IconButton(onClick = { sortMenuExpanded = true }) {
-                            Icon(Icons.Filled.Sort, contentDescription = "排序")
+                            Icon(Icons.AutoMirrored.Filled.Sort, contentDescription = "排序")
                         }
                         DropdownMenu(
                             expanded = sortMenuExpanded,
@@ -328,7 +328,7 @@ fun LibraryScreen(
                     ) {
                         Icon(
                             imageVector = when (libraryState.layoutMode) {
-                                LibraryLayoutMode.Grid -> Icons.Filled.ViewList
+                                LibraryLayoutMode.Grid -> Icons.AutoMirrored.Filled.ViewList
                                 LibraryLayoutMode.List -> Icons.Filled.FolderOpen
                                 LibraryLayoutMode.Directory -> Icons.Filled.GridView
                             },
@@ -901,7 +901,7 @@ private fun FilterContent(
     val hasFilters = selectedCount > 0
 
     Column(modifier = modifier) {
-        TabRow(selectedTabIndex = state.filterTab.ordinal) {
+        PrimaryTabRow(selectedTabIndex = state.filterTab.ordinal) {
             listOf(FilterTab.Tags, FilterTab.Authors, FilterTab.Quality).forEach { tab ->
                 Tab(
                     selected = state.filterTab == tab,
@@ -1033,7 +1033,6 @@ private enum class FilterSortMode {
     CountDesc,
     NameAsc
 }
-
 private fun videoSortModeLabel(mode: VideoSortMode): String {
     return when (mode) {
         VideoSortMode.NameAsc -> "名称 A-Z"
@@ -1581,17 +1580,5 @@ private fun matchTaskFilterLabel(filter: MatchTaskFilter): String {
         MatchTaskFilter.Failed -> "失败"
         MatchTaskFilter.Skipped -> "跳过"
         MatchTaskFilter.Unqueued -> "未匹配"
-    }
-}
-
-private fun matchTaskStatusLabel(status: String): String {
-    return when (status) {
-        MatchTaskStatus.Pending -> "等待中"
-        MatchTaskStatus.Running -> "匹配中"
-        MatchTaskStatus.AutoMatched -> "成功"
-        MatchTaskStatus.NeedReview -> "需复核"
-        MatchTaskStatus.Failed -> "失败"
-        MatchTaskStatus.Skipped -> "跳过"
-        else -> status
     }
 }

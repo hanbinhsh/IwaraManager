@@ -29,6 +29,7 @@ import com.ice.iwaramanager.data.model.WebDavSourceForm
 import com.ice.iwaramanager.data.remote.IwaraSessionManager
 import com.ice.iwaramanager.data.repository.IwaraMetadataRepository
 import com.ice.iwaramanager.data.repository.VideoRepository
+import com.ice.iwaramanager.domain.scanner.LibraryScanCoordinator
 import com.ice.iwaramanager.playback.RemotePlaybackProxyService
 import androidx.paging.PagingData
 import androidx.paging.cachedIn
@@ -287,8 +288,13 @@ class AppViewModel(
     val matchTaskDetailState: StateFlow<MatchTaskDetailUiState> = _matchTaskDetailState
 
     // Paging 查询参数：随来源范围/筛选/搜索词变化，flatMapLatest 切换到新的分页流。
-    private val libraryQueryFlow = MutableStateFlow(LibraryQuery())
-    private val searchQueryFlow = MutableStateFlow(SearchQuery())
+    private var databaseGeneration = 0L
+    private val libraryQueryFlow = MutableStateFlow(
+        LibraryQuery(databaseGeneration = databaseGeneration)
+    )
+    private val searchQueryFlow = MutableStateFlow(
+        SearchQuery(databaseGeneration = databaseGeneration)
+    )
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val libraryVideos: Flow<PagingData<VideoItem>> =
@@ -315,7 +321,7 @@ class AppViewModel(
     private var observeTaskCountsJob: Job? = null
     private var observeTaskDetailJob: Job? = null
     private var observeTaskCandidatesJob: Job? = null
-    private var scanJob: Job? = null
+    private val scanCoordinator = LibraryScanCoordinator(viewModelScope)
 
     init {
         recoverInterruptedMatchTasks()
@@ -439,7 +445,8 @@ class AppViewModel(
         searchQueryFlow.value = SearchQuery(
             sourceIds = currentSourceIds(),
             query = "",
-            sortMode = _libraryState.value.videoSortMode
+            sortMode = _libraryState.value.videoSortMode,
+            databaseGeneration = databaseGeneration
         )
 
         _searchState.update {
@@ -1065,9 +1072,9 @@ class AppViewModel(
         return videoRepository.webDavSavedPassword(sourceId).orEmpty()
     }
 
-    fun deleteLibrarySource(sourceId: String) {
+    fun removeSourceConfiguration(sourceId: String) {
         viewModelScope.launch {
-            runCatching { videoRepository.deleteSource(sourceId) }
+            runCatching { videoRepository.removeSourceConfiguration(sourceId) }
                 .onSuccess {
                     _settingsState.update { it.copy(message = "已移除来源，视频缓存已保留", error = null) }
                     if (_libraryState.value.selectedSourceScopeKey == sourceScopeKey(sourceId)) {
@@ -1419,7 +1426,7 @@ class AppViewModel(
                         updatedAt = System.currentTimeMillis()
                     )
                 )
-                videoRepository.getNextNeedReviewAfter(task)
+                videoRepository.getNextNeedReviewAfter(task, currentSourceIds())
             }.onSuccess { next ->
                 if (next != null) {
                     openMatchTask(next)
@@ -1716,17 +1723,23 @@ class AppViewModel(
     }
 
     fun importDatabase(uri: Uri) {
+        if (_libraryState.value.isScanning || _libraryState.value.isBatchMatching) {
+            _settingsState.update {
+                it.copy(message = null, error = "请等待扫描或批量匹配结束后再导入数据库")
+            }
+            return
+        }
         viewModelScope.launch {
+            stopDatabaseObservers()
             runCatching {
                 videoRepository.importDatabaseFrom(uri)
-            }.onSuccess {
-                if (!_libraryState.value.folderUriString.isNullOrBlank()) {
-                    observeVideoCount()
-                    observeFiltersAndTasks()
-                    observeSearchIfNeeded()
-                }
+            }.onSuccess { result ->
                 _settingsState.update {
-                    it.copy(message = "数据库导入成功；重新扫描后会按文件名和大小恢复绑定", error = null)
+                    it.copy(
+                        message = "数据库导入成功（版本 ${result.databaseVersion}，" +
+                            "${result.importedBytes} 字节）；重新扫描后会按文件名和大小恢复绑定",
+                        error = null
+                    )
                 }
             }.onFailure { error ->
                 _settingsState.update {
@@ -1735,6 +1748,8 @@ class AppViewModel(
                         error = "数据库导入失败：${error.message ?: error::class.java.simpleName}"
                     )
                 }
+            }.also {
+                reloadAfterDatabaseSwap()
             }
         }
     }
@@ -1742,7 +1757,7 @@ class AppViewModel(
     fun clearLibraryFolder() {
         val sourceIds = currentSourceIds().ifEmpty { _libraryState.value.librarySources.map { it.id } }
         viewModelScope.launch {
-            sourceIds.forEach { sourceId -> videoRepository.deleteSource(sourceId) }
+            sourceIds.forEach { sourceId -> videoRepository.removeSourceConfiguration(sourceId) }
             _libraryState.update {
                 it.copy(
                     filteredCount = 0,
@@ -1764,13 +1779,17 @@ class AppViewModel(
         }
     }
 
-    fun cleanupMissingFromConfiguredSources() {
+    fun cleanupOrphanedRecords() {
         viewModelScope.launch {
             runCatching {
-                videoRepository.cleanupMissingFromConfiguredSources(currentSourceIds())
-            }.onSuccess { count ->
+                videoRepository.cleanupOrphanedRecords(currentSourceIds())
+            }.onSuccess { result ->
                 _settingsState.update {
-                    it.copy(message = "已清理 $count 条缺失记录", error = null)
+                    it.copy(
+                        message = "已清理 ${result.mediaRecordsDeleted} 条媒体记录、" +
+                            "${result.folderRecordsDeleted} 条目录缓存",
+                        error = null
+                    )
                 }
                 observeVideoCount()
                 observeFiltersAndTasks()
@@ -1785,6 +1804,56 @@ class AppViewModel(
                 }
             }
         }
+    }
+
+    private fun stopDatabaseObservers() {
+        observeSourcesJob?.cancel()
+        observeVideoCountJob?.cancel()
+        observeSearchCountJob?.cancel()
+        observeFilteredCountJob?.cancel()
+        observeDirectoryFoldersJob?.cancel()
+        observeDirectoryVideosJob?.cancel()
+        observeCountsJob?.cancel()
+        observeTasksJob?.cancel()
+        observeTaskCountsJob?.cancel()
+        observeTaskDetailJob?.cancel()
+        observeTaskCandidatesJob?.cancel()
+        scanCoordinator.cancel()
+    }
+
+    fun reloadAfterDatabaseSwap() {
+        stopDatabaseObservers()
+        databaseGeneration += 1L
+        libraryQueryFlow.value = LibraryQuery(databaseGeneration = databaseGeneration)
+        searchQueryFlow.value = SearchQuery(databaseGeneration = databaseGeneration)
+        _detailState.value = VideoDetailUiState()
+        _playerState.value = PlayerUiState()
+        _matchState.value = MatchUiState()
+        _matchTaskDetailState.value = MatchTaskDetailUiState()
+        _libraryState.update {
+            it.copy(
+                librarySources = emptyList(),
+                sourceScopes = emptyList(),
+                directoryFolders = emptyList(),
+                directoryVideos = emptyList(),
+                filteredCount = 0,
+                tagCounts = emptyList(),
+                authorCounts = emptyList(),
+                qualityCounts = emptyList(),
+                matchTasks = emptyList(),
+                unqueuedVideos = emptyList(),
+                matchTaskFilterCounts = emptyMap(),
+                selectedTagKeys = emptySet(),
+                selectedAuthorKeys = emptySet(),
+                selectedQualities = emptySet(),
+                isScanning = false,
+                isBatchMatching = false
+            )
+        }
+        _searchState.update { it.copy(resultCount = 0, error = null) }
+        _settingsState.update { it.copy(librarySources = emptyList(), isScanning = false) }
+        recoverInterruptedMatchTasks()
+        observeSources()
     }
 
     private fun observeSources() {
@@ -1837,7 +1906,8 @@ class AppViewModel(
             searchQueryFlow.value = SearchQuery(
                 sourceIds = sourceIds,
                 query = "",
-                sortMode = _libraryState.value.videoSortMode
+                sortMode = _libraryState.value.videoSortMode,
+                databaseGeneration = databaseGeneration
             )
             _searchState.update { it.copy(resultCount = 0, error = null) }
             return
@@ -1845,7 +1915,8 @@ class AppViewModel(
         searchQueryFlow.value = SearchQuery(
             sourceIds = sourceIds,
             query = query,
-            sortMode = _libraryState.value.videoSortMode
+            sortMode = _libraryState.value.videoSortMode,
+            databaseGeneration = databaseGeneration
         )
         observeSearchCountJob = viewModelScope.launch {
             videoRepository.observeSearchVideoCount(sourceIds, query).collectLatest { count ->
@@ -1855,45 +1926,53 @@ class AppViewModel(
     }
 
     private fun scanSources(sourceIds: List<String>) {
-        scanJob?.cancel()
-        scanJob = viewModelScope.launch {
-            _libraryState.update { it.copy(isScanning = true, scanDone = 0, scanTotal = 0, scanCurrentName = null, error = null) }
-            _settingsState.update { it.copy(isScanning = true, error = null) }
-            try {
+        scanCoordinator.launch(
+            onStarted = {
+                _libraryState.update { it.copy(isScanning = true, scanDone = 0, scanTotal = 0, scanCurrentName = null, error = null) }
+                _settingsState.update { it.copy(isScanning = true, error = null) }
+            },
+            scan = {
                 videoRepository.scanSources(sourceIds) { progress ->
                     _libraryState.update {
                         it.copy(scanDone = progress.done, scanTotal = progress.total, scanCurrentName = progress.currentName)
                     }
                 }
+            },
+            onCompleted = {
                 _libraryState.update { it.copy(isScanning = false, scanCurrentName = null, error = null) }
                 _settingsState.update { it.copy(isScanning = false, error = null, message = "扫描完成") }
-            } catch (e: Exception) {
-                val message = e.message ?: "扫描失败"
+            },
+            onFailed = { error ->
+                val message = error.message ?: "扫描失败"
                 _libraryState.update { it.copy(isScanning = false, scanCurrentName = null, error = message) }
                 _settingsState.update { it.copy(isScanning = false, error = message) }
             }
-        }
+        )
     }
 
     private fun scanSource(sourceId: String) {
-        scanJob?.cancel()
-        scanJob = viewModelScope.launch {
-            _libraryState.update { it.copy(isScanning = true, scanDone = 0, scanTotal = 0, scanCurrentName = null, error = null) }
-            _settingsState.update { it.copy(isScanning = true, error = null) }
-            try {
+        scanCoordinator.launch(
+            onStarted = {
+                _libraryState.update { it.copy(isScanning = true, scanDone = 0, scanTotal = 0, scanCurrentName = null, error = null) }
+                _settingsState.update { it.copy(isScanning = true, error = null) }
+            },
+            scan = {
                 videoRepository.scanSource(sourceId) { progress ->
                     _libraryState.update {
                         it.copy(scanDone = progress.done, scanTotal = progress.total, scanCurrentName = progress.currentName)
                     }
                 }
+            },
+            onCompleted = {
                 _libraryState.update { it.copy(isScanning = false, scanCurrentName = null, error = null) }
                 _settingsState.update { it.copy(isScanning = false, error = null, message = "扫描完成") }
-            } catch (e: Exception) {
-                val message = e.message ?: "扫描失败"
+            },
+            onFailed = { error ->
+                val message = error.message ?: "扫描失败"
                 _libraryState.update { it.copy(isScanning = false, scanCurrentName = null, error = message) }
                 _settingsState.update { it.copy(isScanning = false, error = message) }
             }
-        }
+        )
     }
 
     private fun observeFiltersAndTasks() {
@@ -1912,7 +1991,8 @@ class AppViewModel(
             tagKeys = state.selectedTagKeys,
             authorKeys = state.selectedAuthorKeys,
             qualities = state.selectedQualities,
-            sortMode = state.videoSortMode
+            sortMode = state.videoSortMode,
+            databaseGeneration = databaseGeneration
         )
         // 单独观察总数用于“共 N 个视频”显示（分页流本身只知道已加载数量）
         observeFilteredCountJob?.cancel()
@@ -2600,13 +2680,15 @@ class AppViewModel(
         val tagKeys: Set<String> = emptySet(),
         val authorKeys: Set<String> = emptySet(),
         val qualities: Set<String> = emptySet(),
-        val sortMode: VideoSortMode = VideoSortMode.NameAsc
+        val sortMode: VideoSortMode = VideoSortMode.NameAsc,
+        val databaseGeneration: Long = 0L
     )
 
     private data class SearchQuery(
         val sourceIds: List<String> = emptyList(),
         val query: String = "",
-        val sortMode: VideoSortMode = VideoSortMode.NameAsc
+        val sortMode: VideoSortMode = VideoSortMode.NameAsc,
+        val databaseGeneration: Long = 0L
     )
 
     private fun currentSourceIds(): List<String> {

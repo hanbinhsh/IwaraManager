@@ -29,7 +29,7 @@ import com.ice.iwaramanager.data.local.entity.VideoTagEntity
         LibraryFolderEntity::class
     ],
     version = 8,
-    exportSchema = false
+    exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun videoDao(): VideoDao

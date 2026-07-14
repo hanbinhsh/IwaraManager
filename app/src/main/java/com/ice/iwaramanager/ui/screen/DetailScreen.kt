@@ -648,16 +648,9 @@ private fun remoteTags(rawJson: String?): List<RemoteTag> {
 }
 
 private fun authorLabel(video: VideoItem): String {
-    val name = video.remoteAuthorName
-        ?.takeIf { it.isNotBlank() && it != video.remoteAuthorUsername }
-    val username = video.remoteAuthorUsername?.takeIf { it.isNotBlank() }
-    return when {
-        name != null && username != null -> "$name $username"
-        name != null -> name
-        username != null -> username
-        !video.remoteAuthorId.isNullOrBlank() -> video.remoteAuthorId
-        else -> "未知"
-    }
+    return formatAuthorLabel(video.remoteAuthorName, video.remoteAuthorUsername)
+        ?: video.remoteAuthorId?.takeIf { it.isNotBlank() }
+        ?: "未知"
 }
 
 private fun matchStatusLabel(status: String): String {

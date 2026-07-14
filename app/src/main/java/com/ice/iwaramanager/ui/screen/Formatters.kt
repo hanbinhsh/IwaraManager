@@ -1,6 +1,7 @@
 package com.ice.iwaramanager.ui.screen
 
 import com.ice.iwaramanager.data.model.VideoItem
+import com.ice.iwaramanager.data.model.MatchTaskStatus
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
@@ -8,6 +9,7 @@ import java.time.format.DateTimeFormatter
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.abs
 
 private val DisplayDateTimeFormatter: DateTimeFormatter =
     DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
@@ -91,4 +93,55 @@ fun buildVideoInfoLine(
     ).joinToString(" · ").ifBlank {
         video.extension ?: "本地视频"
     }
+}
+
+fun formatAuthorLabel(
+    authorName: String?,
+    authorUsername: String?
+): String? {
+    val name = authorName?.takeIf { it.isNotBlank() && it != authorUsername }
+    val username = authorUsername?.takeIf { it.isNotBlank() }
+    return when {
+        name != null && username != null -> "$name $username"
+        name != null -> name
+        username != null -> username
+        else -> null
+    }
+}
+
+fun durationMatched(
+    localDurationMs: Long?,
+    remoteDurationSeconds: Long?,
+    toleranceSeconds: Long = 2L
+): Boolean? {
+    val localSeconds = localDurationMs?.takeIf { it > 0L }?.div(1000L) ?: return null
+    val remoteSeconds = remoteDurationSeconds?.takeIf { it > 0L } ?: return null
+    return abs(localSeconds - remoteSeconds) <= toleranceSeconds
+}
+
+fun formatDurationComparison(
+    localDurationMs: Long?,
+    remoteDurationSeconds: Long?
+): String {
+    val local = localDurationMs?.takeIf { it > 0L }
+    val remote = remoteDurationSeconds?.takeIf { it > 0L }?.times(1000L)
+    return when {
+        local != null && remote != null -> {
+            val matched = durationMatched(localDurationMs, remoteDurationSeconds) == true
+            "时长${if (matched) "一致" else "不一致"}：本地 ${formatDuration(local)} / 候选 ${formatDuration(remote)}"
+        }
+        local != null -> "本地时长：${formatDuration(local)} / 候选时长：未知"
+        remote != null -> "本地时长：未知 / 候选 ${formatDuration(remote)}"
+        else -> "时长：未知"
+    }
+}
+
+fun matchTaskStatusLabel(status: String): String = when (status) {
+    MatchTaskStatus.Pending -> "等待中"
+    MatchTaskStatus.Running -> "匹配中"
+    MatchTaskStatus.AutoMatched -> "成功"
+    MatchTaskStatus.NeedReview -> "需复核"
+    MatchTaskStatus.Failed -> "失败"
+    MatchTaskStatus.Skipped -> "跳过"
+    else -> status
 }

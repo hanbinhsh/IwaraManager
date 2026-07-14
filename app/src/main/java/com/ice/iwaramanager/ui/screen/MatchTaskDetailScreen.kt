@@ -47,7 +47,6 @@ import com.ice.iwaramanager.data.local.entity.MatchCandidateEntity
 import com.ice.iwaramanager.data.local.entity.MatchTaskEntity
 import com.ice.iwaramanager.data.model.MatchTaskStatus
 import java.io.File
-import kotlin.math.abs
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -268,7 +267,7 @@ private fun CandidateCard(
         supportingContent = {
             Column {
                 val info = listOfNotNull(
-                    authorLabel(candidate.authorName, candidate.authorUsername),
+                    formatAuthorLabel(candidate.authorName, candidate.authorUsername),
                     candidate.rating,
                     candidate.createdAtText,
                     "ID:${candidate.iwaraId}"
@@ -282,7 +281,7 @@ private fun CandidateCard(
 
                 val durationMatched = durationMatched(localDurationMs, candidate.durationSeconds)
                 Text(
-                    text = durationCompareText(localDurationMs, candidate.durationSeconds),
+                    text = formatDurationComparison(localDurationMs, candidate.durationSeconds),
                     color = if (durationMatched == true) {
                         MaterialTheme.colorScheme.primary
                     } else {
@@ -338,56 +337,4 @@ private fun CandidateCard(
             }
         }
     )
-}
-
-private fun authorLabel(
-    authorName: String?,
-    authorUsername: String?
-): String? {
-    val name = authorName?.takeIf { it.isNotBlank() && it != authorUsername }
-    val username = authorUsername?.takeIf { it.isNotBlank() }
-    return when {
-        name != null && username != null -> "$name $username"
-        name != null -> name
-        username != null -> username
-        else -> null
-    }
-}
-
-private fun durationCompareText(
-    localDurationMs: Long?,
-    remoteDurationSeconds: Long?
-): String {
-    val local = localDurationMs?.takeIf { it > 0L }
-    val remote = remoteDurationSeconds?.takeIf { it > 0L }?.times(1000L)
-    return when {
-        local != null && remote != null -> {
-            val matched = durationMatched(localDurationMs, remoteDurationSeconds) == true
-            "时长${if (matched) "一致" else "不一致"}：本地 ${formatDuration(local)} / 候选 ${formatDuration(remote)}"
-        }
-        local != null -> "本地时长：${formatDuration(local)} / 候选时长：未知"
-        remote != null -> "本地时长：未知 / 候选 ${formatDuration(remote)}"
-        else -> "时长：未知"
-    }
-}
-
-private fun durationMatched(
-    localDurationMs: Long?,
-    remoteDurationSeconds: Long?
-): Boolean? {
-    val localSeconds = localDurationMs?.takeIf { it > 0L }?.div(1000L) ?: return null
-    val remoteSeconds = remoteDurationSeconds?.takeIf { it > 0L } ?: return null
-    return abs(localSeconds - remoteSeconds) <= 2L
-}
-
-private fun matchTaskStatusLabel(status: String): String {
-    return when (status) {
-        MatchTaskStatus.Pending -> "等待中"
-        MatchTaskStatus.Running -> "匹配中"
-        MatchTaskStatus.AutoMatched -> "成功"
-        MatchTaskStatus.NeedReview -> "需复核"
-        MatchTaskStatus.Failed -> "失败"
-        MatchTaskStatus.Skipped -> "跳过"
-        else -> status
-    }
 }

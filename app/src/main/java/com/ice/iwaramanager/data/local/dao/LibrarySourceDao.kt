@@ -33,9 +33,6 @@ interface LibrarySourceDao {
     @Query("SELECT * FROM library_folder WHERE sourceId = :sourceId AND COALESCE(parentPath, '') = :parentPath ORDER BY name COLLATE NOCASE ASC")
     fun observeChildFolders(sourceId: String, parentPath: String): Flow<List<LibraryFolderEntity>>
 
-    @Query("SELECT * FROM library_folder WHERE sourceId = :sourceId AND COALESCE(parentPath, '') = :parentPath ORDER BY name COLLATE NOCASE ASC")
-    suspend fun getChildFolders(sourceId: String, parentPath: String): List<LibraryFolderEntity>
-
     @Query("DELETE FROM library_folder WHERE sourceId = :sourceId")
     suspend fun deleteFoldersForSource(sourceId: String)
 
@@ -46,11 +43,11 @@ interface LibrarySourceDao {
         AND sourceId NOT IN (:sourceIds)
         """
     )
-    suspend fun deleteFoldersOutsideSourceIds(sourceIds: List<String>, sourceCount: Int)
+    suspend fun deleteFoldersOutsideSourceIds(sourceIds: List<String>, sourceCount: Int): Int
 
     @Upsert
     suspend fun upsertFolders(folders: List<LibraryFolderEntity>)
 
     @Query("DELETE FROM library_folder")
-    suspend fun clearFolders()
+    suspend fun clearFolders(): Int
 }

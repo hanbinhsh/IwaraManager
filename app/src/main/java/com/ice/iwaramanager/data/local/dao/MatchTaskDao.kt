@@ -16,23 +16,14 @@ data class MatchTaskStatusCount(
 
 @Dao
 interface MatchTaskDao {
-    @Query("SELECT * FROM match_task WHERE libraryRootUriString = :libraryRootUriString ORDER BY updatedAt DESC, id DESC")
-    fun observeTasks(libraryRootUriString: String): Flow<List<MatchTaskEntity>>
-
     @Query("SELECT * FROM match_task WHERE (:sourceCount = 0 OR libraryRootUriString IN (:sourceIds)) ORDER BY updatedAt DESC, id DESC")
     fun observeTasksForSourceIds(sourceIds: List<String>, sourceCount: Int): Flow<List<MatchTaskEntity>>
-
-    @Query("SELECT * FROM match_task WHERE libraryRootUriString = :libraryRootUriString AND status IN (:statuses) ORDER BY updatedAt DESC, id DESC")
-    fun observeTasksByStatuses(libraryRootUriString: String, statuses: List<String>): Flow<List<MatchTaskEntity>>
 
     @Query("SELECT * FROM match_task WHERE (:sourceCount = 0 OR libraryRootUriString IN (:sourceIds)) AND status IN (:statuses) ORDER BY updatedAt DESC, id DESC")
     fun observeTasksByStatusesForSourceIds(sourceIds: List<String>, sourceCount: Int, statuses: List<String>): Flow<List<MatchTaskEntity>>
 
     @Query("SELECT * FROM match_task WHERE (:sourceCount = 0 OR libraryRootUriString IN (:sourceIds)) AND status IN (:statuses) ORDER BY updatedAt DESC, id DESC")
     suspend fun getTasksByStatusesForSourceIds(sourceIds: List<String>, sourceCount: Int, statuses: List<String>): List<MatchTaskEntity>
-
-    @Query("SELECT status, COUNT(*) AS count FROM match_task WHERE libraryRootUriString = :libraryRootUriString GROUP BY status")
-    fun observeStatusCounts(libraryRootUriString: String): Flow<List<MatchTaskStatusCount>>
 
     @Query("SELECT status, COUNT(*) AS count FROM match_task WHERE (:sourceCount = 0 OR libraryRootUriString IN (:sourceIds)) GROUP BY status")
     fun observeStatusCountsForSourceIds(sourceIds: List<String>, sourceCount: Int): Flow<List<MatchTaskStatusCount>>
@@ -92,13 +83,10 @@ interface MatchTaskDao {
     @Query("SELECT * FROM match_candidate WHERE taskId = :taskId ORDER BY id ASC")
     fun observeCandidatesForTask(taskId: Long): Flow<List<MatchCandidateEntity>>
 
-    @Query("SELECT * FROM match_candidate WHERE taskId = :taskId ORDER BY id ASC")
-    suspend fun getCandidatesForTask(taskId: Long): List<MatchCandidateEntity>
-
     @Query(
         """
         SELECT * FROM match_task
-        WHERE libraryRootUriString = :libraryRootUriString
+        WHERE (:sourceCount = 0 OR libraryRootUriString IN (:sourceIds))
         AND status = :status
         AND (updatedAt < :currentUpdatedAt OR (updatedAt = :currentUpdatedAt AND id < :currentTaskId))
         ORDER BY updatedAt DESC, id DESC
@@ -106,7 +94,8 @@ interface MatchTaskDao {
         """
     )
     suspend fun getNextTaskByStatusAfterCursor(
-        libraryRootUriString: String,
+        sourceIds: List<String>,
+        sourceCount: Int,
         status: String,
         currentUpdatedAt: Long,
         currentTaskId: Long
@@ -115,17 +104,19 @@ interface MatchTaskDao {
     @Query(
         """
         SELECT * FROM match_task
-        WHERE libraryRootUriString = :libraryRootUriString
+        WHERE (:sourceCount = 0 OR libraryRootUriString IN (:sourceIds))
         AND status = :status
         AND id != :currentTaskId
         ORDER BY updatedAt DESC, id DESC
         LIMIT 1
         """
     )
-    suspend fun getFirstTaskByStatus(libraryRootUriString: String, status: String, currentTaskId: Long): MatchTaskEntity?
-
-    @Query("DELETE FROM match_task WHERE libraryRootUriString = :sourceId")
-    suspend fun deleteTasksBySource(sourceId: String)
+    suspend fun getFirstTaskByStatus(
+        sourceIds: List<String>,
+        sourceCount: Int,
+        status: String,
+        currentTaskId: Long
+    ): MatchTaskEntity?
 
     @Query("DELETE FROM match_task WHERE videoUriString IN (:videoUriStrings)")
     suspend fun deleteTasksForVideos(videoUriStrings: List<String>)

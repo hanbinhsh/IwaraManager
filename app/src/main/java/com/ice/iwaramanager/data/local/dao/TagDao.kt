@@ -40,19 +40,6 @@ interface TagDao {
         FROM iwara_tag t
         INNER JOIN video_tag vt ON vt.tagKey = t.key
         INNER JOIN video v ON v.uriString = vt.videoUriString
-        WHERE v.libraryRootUriString = :libraryRootUriString
-        GROUP BY t.key, t.name
-        ORDER BY count DESC, t.name ASC
-        """
-    )
-    fun observeTagCounts(libraryRootUriString: String): Flow<List<CountItem>>
-
-    @Query(
-        """
-        SELECT t.`key` AS itemKey, t.name AS label, COUNT(*) AS count
-        FROM iwara_tag t
-        INNER JOIN video_tag vt ON vt.tagKey = t.key
-        INNER JOIN video v ON v.uriString = vt.videoUriString
         WHERE (:sourceCount = 0 OR v.sourceId IN (:sourceIds))
         GROUP BY t.key, t.name
         ORDER BY count DESC, t.name ASC
