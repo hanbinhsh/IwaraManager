@@ -1,5 +1,6 @@
 package com.ice.iwaramanager.data.local.dao
 
+import androidx.paging.PagingSource
 import androidx.room.Dao
 import androidx.room.Query
 import androidx.room.Upsert
@@ -14,86 +15,62 @@ interface VideoDao {
     @Query(
         """
         SELECT * FROM video
-        WHERE (:sourceCount = 0 OR sourceId IN (:sourceIds))
-        ORDER BY updatedAt DESC
-        """
-    )
-    fun observeVideosBySourceIds(sourceIds: List<String>, sourceCount: Int): Flow<List<VideoEntity>>
-
-    @Query(
-        """
-        SELECT * FROM video
         WHERE sourceId = :sourceId
         AND COALESCE(parentPath, '') = :parentPath
-        ORDER BY displayName COLLATE NOCASE ASC
+        ORDER BY
+            CASE WHEN :sortMode = 'NameAsc' THEN COALESCE(title, displayName) END COLLATE NOCASE ASC,
+            CASE WHEN :sortMode = 'NameDesc' THEN COALESCE(title, displayName) END COLLATE NOCASE DESC,
+            CASE WHEN :sortMode = 'FileTimeDesc' THEN COALESCE(lastModified, 0) END DESC,
+            CASE WHEN :sortMode = 'FileTimeAsc' THEN COALESCE(lastModified, 0) END ASC,
+            CASE WHEN :sortMode = 'DurationDesc' THEN COALESCE(durationMs, 0) END DESC,
+            CASE WHEN :sortMode = 'DurationAsc' THEN COALESCE(durationMs, 0) END ASC,
+            CASE WHEN :sortMode = 'FileSizeDesc' THEN COALESCE(fileSize, 0) END DESC,
+            CASE WHEN :sortMode = 'FileSizeAsc' THEN COALESCE(fileSize, 0) END ASC,
+            COALESCE(title, displayName) COLLATE NOCASE ASC
         """
     )
-    fun observeVideosInFolder(sourceId: String, parentPath: String): Flow<List<VideoEntity>>
+    fun observeVideosInFolder(sourceId: String, parentPath: String, sortMode: String): Flow<List<VideoEntity>>
 
     @Query(
         """
-        SELECT * FROM video
-        WHERE libraryRootUriString = :libraryRootUriString
-        AND (
-            displayName LIKE '%' || :query || '%'
-            OR title LIKE '%' || :query || '%'
-            OR sourceVideoId LIKE '%' || :query || '%'
-            OR matchedIwaraId LIKE '%' || :query || '%'
-            OR remoteTitle LIKE '%' || :query || '%'
-            OR remoteAuthorName LIKE '%' || :query || '%'
-            OR remoteAuthorUsername LIKE '%' || :query || '%'
-            OR quality LIKE '%' || :query || '%'
-        )
-        ORDER BY updatedAt DESC
-        """
-    )
-    fun observeVideosBySearch(libraryRootUriString: String, query: String): Flow<List<VideoEntity>>
-
-    @Query(
-        """
-        SELECT * FROM video
+        SELECT uriString, libraryRootUriString, sourceId, relativePath, parentPath, displayName,
+               fileSize, lastModified, title, sourceVideoId, quality, extension, durationMs,
+               width, height, coverFilePath, matchedIwaraId, matchStatus
+        FROM video
         WHERE (:sourceCount = 0 OR sourceId IN (:sourceIds))
-        AND (
-            displayName LIKE '%' || :query || '%'
-            OR title LIKE '%' || :query || '%'
-            OR sourceVideoId LIKE '%' || :query || '%'
-            OR matchedIwaraId LIKE '%' || :query || '%'
-            OR remoteTitle LIKE '%' || :query || '%'
-            OR remoteAuthorName LIKE '%' || :query || '%'
-            OR remoteAuthorUsername LIKE '%' || :query || '%'
-            OR quality LIKE '%' || :query || '%'
-        )
-        ORDER BY updatedAt DESC
-        """
-    )
-    fun observeVideosBySearchForSourceIds(sourceIds: List<String>, sourceCount: Int, query: String): Flow<List<VideoEntity>>
-
-    @Query(
-        """
-        SELECT * FROM video
-        WHERE libraryRootUriString = :libraryRootUriString
         AND (:authorKeyCount = 0 OR COALESCE(remoteAuthorUsername, remoteAuthorId, remoteAuthorName, '') IN (:authorKeys))
         AND (:qualityCount = 0 OR COALESCE(quality, '') IN (:qualities))
         AND (:tagCount = 0 OR uriString IN (
             SELECT videoUriString FROM video_tag WHERE tagKey IN (:tagKeys)
             GROUP BY videoUriString HAVING COUNT(DISTINCT tagKey) = :tagCount
         ))
-        ORDER BY updatedAt DESC
+        ORDER BY
+            CASE WHEN :sortMode = 'NameAsc' THEN COALESCE(title, displayName) END COLLATE NOCASE ASC,
+            CASE WHEN :sortMode = 'NameDesc' THEN COALESCE(title, displayName) END COLLATE NOCASE DESC,
+            CASE WHEN :sortMode = 'FileTimeDesc' THEN COALESCE(lastModified, 0) END DESC,
+            CASE WHEN :sortMode = 'FileTimeAsc' THEN COALESCE(lastModified, 0) END ASC,
+            CASE WHEN :sortMode = 'DurationDesc' THEN COALESCE(durationMs, 0) END DESC,
+            CASE WHEN :sortMode = 'DurationAsc' THEN COALESCE(durationMs, 0) END ASC,
+            CASE WHEN :sortMode = 'FileSizeDesc' THEN COALESCE(fileSize, 0) END DESC,
+            CASE WHEN :sortMode = 'FileSizeAsc' THEN COALESCE(fileSize, 0) END ASC,
+            COALESCE(title, displayName) COLLATE NOCASE ASC
         """
     )
-    fun observeVideosByFilters(
-        libraryRootUriString: String,
+    fun pagingVideosByFiltersForSourceIds(
+        sourceIds: List<String>,
+        sourceCount: Int,
         tagKeys: List<String>,
         tagCount: Int,
         authorKeys: List<String>,
         authorKeyCount: Int,
         qualities: List<String>,
-        qualityCount: Int
-    ): Flow<List<VideoEntity>>
+        qualityCount: Int,
+        sortMode: String
+    ): PagingSource<Int, VideoListRow>
 
     @Query(
         """
-        SELECT * FROM video
+        SELECT COUNT(*) FROM video
         WHERE (:sourceCount = 0 OR sourceId IN (:sourceIds))
         AND (:authorKeyCount = 0 OR COALESCE(remoteAuthorUsername, remoteAuthorId, remoteAuthorName, '') IN (:authorKeys))
         AND (:qualityCount = 0 OR COALESCE(quality, '') IN (:qualities))
@@ -101,10 +78,9 @@ interface VideoDao {
             SELECT videoUriString FROM video_tag WHERE tagKey IN (:tagKeys)
             GROUP BY videoUriString HAVING COUNT(DISTINCT tagKey) = :tagCount
         ))
-        ORDER BY updatedAt DESC
         """
     )
-    fun observeVideosByFiltersForSourceIds(
+    fun observeVideoCountByFiltersForSourceIds(
         sourceIds: List<String>,
         sourceCount: Int,
         tagKeys: List<String>,
@@ -113,7 +89,56 @@ interface VideoDao {
         authorKeyCount: Int,
         qualities: List<String>,
         qualityCount: Int
-    ): Flow<List<VideoEntity>>
+    ): Flow<Int>
+
+    @Query(
+        """
+        SELECT uriString, libraryRootUriString, sourceId, relativePath, parentPath, displayName,
+               fileSize, lastModified, title, sourceVideoId, quality, extension, durationMs,
+               width, height, coverFilePath, matchedIwaraId, matchStatus
+        FROM video
+        WHERE (:sourceCount = 0 OR sourceId IN (:sourceIds))
+        AND (
+            displayName LIKE '%' || :query || '%'
+            OR title LIKE '%' || :query || '%'
+            OR sourceVideoId LIKE '%' || :query || '%'
+            OR matchedIwaraId LIKE '%' || :query || '%'
+            OR remoteTitle LIKE '%' || :query || '%'
+            OR remoteAuthorName LIKE '%' || :query || '%'
+            OR remoteAuthorUsername LIKE '%' || :query || '%'
+            OR quality LIKE '%' || :query || '%'
+        )
+        ORDER BY
+            CASE WHEN :sortMode = 'NameAsc' THEN COALESCE(title, displayName) END COLLATE NOCASE ASC,
+            CASE WHEN :sortMode = 'NameDesc' THEN COALESCE(title, displayName) END COLLATE NOCASE DESC,
+            CASE WHEN :sortMode = 'FileTimeDesc' THEN COALESCE(lastModified, 0) END DESC,
+            CASE WHEN :sortMode = 'FileTimeAsc' THEN COALESCE(lastModified, 0) END ASC,
+            CASE WHEN :sortMode = 'DurationDesc' THEN COALESCE(durationMs, 0) END DESC,
+            CASE WHEN :sortMode = 'DurationAsc' THEN COALESCE(durationMs, 0) END ASC,
+            CASE WHEN :sortMode = 'FileSizeDesc' THEN COALESCE(fileSize, 0) END DESC,
+            CASE WHEN :sortMode = 'FileSizeAsc' THEN COALESCE(fileSize, 0) END ASC,
+            COALESCE(title, displayName) COLLATE NOCASE ASC
+        """
+    )
+    fun pagingVideosBySearchForSourceIds(sourceIds: List<String>, sourceCount: Int, query: String, sortMode: String): PagingSource<Int, VideoListRow>
+
+    @Query(
+        """
+        SELECT COUNT(*) FROM video
+        WHERE (:sourceCount = 0 OR sourceId IN (:sourceIds))
+        AND (
+            displayName LIKE '%' || :query || '%'
+            OR title LIKE '%' || :query || '%'
+            OR sourceVideoId LIKE '%' || :query || '%'
+            OR matchedIwaraId LIKE '%' || :query || '%'
+            OR remoteTitle LIKE '%' || :query || '%'
+            OR remoteAuthorName LIKE '%' || :query || '%'
+            OR remoteAuthorUsername LIKE '%' || :query || '%'
+            OR quality LIKE '%' || :query || '%'
+        )
+        """
+    )
+    fun observeVideoCountBySearchForSourceIds(sourceIds: List<String>, sourceCount: Int, query: String): Flow<Int>
 
     @Query(
         """
@@ -270,6 +295,29 @@ interface VideoDao {
 
     @Query(
         """
+        SELECT * FROM video
+        WHERE (:sourceCount = 0 OR sourceId IN (:sourceIds))
+        AND matchedIwaraId IS NOT NULL AND matchedIwaraId != ''
+        AND (
+            remoteDurationSeconds IS NULL
+            OR remoteDurationSeconds <= 0
+            OR (
+                durationMs IS NOT NULL
+                AND durationMs > 0
+                AND ABS(((durationMs + 500) / 1000) - remoteDurationSeconds) > :toleranceSeconds
+            )
+        )
+        ORDER BY updatedAt DESC
+        """
+    )
+    suspend fun getMatchedVideosWithDurationIssuesForSourceIds(
+        sourceIds: List<String>,
+        sourceCount: Int,
+        toleranceSeconds: Int
+    ): List<VideoEntity>
+
+    @Query(
+        """
         UPDATE video SET
             matchedIwaraId = :matchedIwaraId,
             remoteTitle = :remoteTitle,
@@ -316,6 +364,14 @@ interface VideoDao {
         updatedAt: Long
     )
 
+    @Query(
+        """
+        SELECT COUNT(*) FROM video
+        WHERE (:sourceCount = 0 OR sourceId IN (:sourceIds))
+        """
+    )
+    fun observeVideoCountForSourceIds(sourceIds: List<String>, sourceCount: Int): kotlinx.coroutines.flow.Flow<Int>
+
     @Query("SELECT * FROM video WHERE libraryRootUriString = :libraryRootUriString")
     suspend fun findAllByRoot(libraryRootUriString: String): List<VideoEntity>
 
@@ -340,8 +396,28 @@ interface VideoDao {
     )
     suspend fun getVideoUrisOutsideSourceIds(sourceIds: List<String>, sourceCount: Int): List<String>
 
+    @Query("SELECT uriString FROM video")
+    suspend fun getAllVideoUris(): List<String>
+
     @Query("SELECT * FROM video WHERE uriString = :uriString LIMIT 1")
     suspend fun findByUri(uriString: String): VideoEntity?
+
+    @Query(
+        """
+        SELECT * FROM video
+        WHERE displayName = :displayName
+        AND fileSize = :fileSize
+        AND uriString != :uriString
+        ORDER BY
+            CASE WHEN matchedIwaraId IS NULL OR matchedIwaraId = '' THEN 1 ELSE 0 END,
+            updatedAt DESC
+        """
+    )
+    suspend fun findReusableMovedVideos(
+        displayName: String,
+        fileSize: Long,
+        uriString: String
+    ): List<VideoEntity>
 
     @Upsert
     suspend fun upsertAll(videos: List<VideoEntity>)
@@ -351,12 +427,6 @@ interface VideoDao {
 
     @Query("DELETE FROM video WHERE sourceId = :sourceId")
     suspend fun deleteBySource(sourceId: String)
-
-    @Query("DELETE FROM video WHERE libraryRootUriString = :libraryRootUriString AND uriString NOT IN (:existingUris)")
-    suspend fun deleteMissingByRoot(libraryRootUriString: String, existingUris: List<String>)
-
-    @Query("DELETE FROM video WHERE sourceId = :sourceId AND uriString NOT IN (:existingUris)")
-    suspend fun deleteMissingBySource(sourceId: String, existingUris: List<String>)
 
     @Query("DELETE FROM video WHERE uriString IN (:uris)")
     suspend fun deleteByUris(uris: List<String>)

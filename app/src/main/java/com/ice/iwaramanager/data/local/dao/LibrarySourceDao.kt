@@ -39,6 +39,15 @@ interface LibrarySourceDao {
     @Query("DELETE FROM library_folder WHERE sourceId = :sourceId")
     suspend fun deleteFoldersForSource(sourceId: String)
 
+    @Query(
+        """
+        DELETE FROM library_folder
+        WHERE :sourceCount > 0
+        AND sourceId NOT IN (:sourceIds)
+        """
+    )
+    suspend fun deleteFoldersOutsideSourceIds(sourceIds: List<String>, sourceCount: Int)
+
     @Upsert
     suspend fun upsertFolders(folders: List<LibraryFolderEntity>)
 

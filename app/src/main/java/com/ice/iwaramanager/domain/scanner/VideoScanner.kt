@@ -15,6 +15,7 @@ class VideoScanner(
     private val context: Context
 ) {
     private val videoExtensions = setOf("mp4", "mkv", "webm", "mov", "m4v")
+    private val unsafeNameChars = Regex("""[^\w.\-]+""")
 
     /**
      * 扫描本地目录。每发现一个视频就通过 [onVideo] 回调立即交给上层写入数据库（边扫边存），
@@ -64,8 +65,7 @@ class VideoScanner(
             val lastModified = file.lastModified()
             onProgress(ScanProgress(done = index, total = sortedFiles.size, currentName = name))
             val needsMetadata = needsMetadata(known[uriString], fileSize, lastModified)
-            val metadata = if (needsMetadata) readVideoMetadata(file.uri) else VideoMetadata(null, null, null)
-            val coverPath = if (needsMetadata) extractCoverToCache(videoUri = file.uri, videoName = name) else null
+            val metadata = if (needsMetadata) readMetadataAndCover(file.uri, name) else ScanMetadata(null, null, null, null)
             onVideo(
                 ScannedVideo(
                     displayName = name,
@@ -75,7 +75,7 @@ class VideoScanner(
                     durationMs = metadata.durationMs,
                     width = metadata.width,
                     height = metadata.height,
-                    coverFilePath = coverPath,
+                    coverFilePath = metadata.coverPath,
                     relativePath = joinPath(parentPath, name),
                     parentPath = parentPath.ifBlank { null }
                 )
@@ -93,34 +93,39 @@ class VideoScanner(
         return !(unchanged && known.hasDuration && coverOk)
     }
 
-    private fun readVideoMetadata(uri: Uri): VideoMetadata {
+    /**
+     * 单次打开 MediaMetadataRetriever，一并读取时长/宽高并抽取封面，避免对同一文件 setDataSource 两次。
+     * 封面文件已存在则跳过抽帧。
+     */
+    private fun readMetadataAndCover(uri: Uri, videoName: String): ScanMetadata {
+        val coverFile = coverFileFor(uri, videoName)
+        val existingCover = coverFile.takeIf { it.exists() && it.length() > 0L }?.absolutePath
         val retriever = MediaMetadataRetriever()
         return try {
             retriever.setDataSource(context, uri)
-            VideoMetadata(
-                durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull(),
-                width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull(),
-                height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull()
-            )
+            val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
+            val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull()
+            val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull()
+            val coverPath = existingCover ?: extractCover(retriever, coverFile)
+            ScanMetadata(durationMs, width, height, coverPath)
         } catch (_: Exception) {
-            VideoMetadata(null, null, null)
+            ScanMetadata(null, null, null, existingCover)
         } finally {
             runCatching { retriever.release() }
         }
     }
 
-    private fun extractCoverToCache(videoUri: Uri, videoName: String): String? {
+    private fun coverFileFor(videoUri: Uri, videoName: String): File {
         // 封面存放在 filesDir（持久化目录）而非 cacheDir，避免系统在存储紧张时清理缓存导致封面丢失。
         val coverDir = File(context.filesDir, "video_covers")
         if (!coverDir.exists()) coverDir.mkdirs()
-        val safeName = videoName.replace(Regex("""[^\w.\-]+"""), "_").take(80)
+        val safeName = videoName.replace(unsafeNameChars, "_").take(80)
         val hash = videoUri.toString().hashCode().absoluteValue
-        val coverFile = File(coverDir, "${hash}_${safeName}.jpg")
-        if (coverFile.exists() && coverFile.length() > 0L) return coverFile.absolutePath
+        return File(coverDir, "${hash}_${safeName}.jpg")
+    }
 
-        val retriever = MediaMetadataRetriever()
+    private fun extractCover(retriever: MediaMetadataRetriever, coverFile: File): String? {
         return try {
-            retriever.setDataSource(context, videoUri)
             val bitmap = retriever.getFrameAtTime(1_000_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                 ?: retriever.frameAtTime ?: return null
             FileOutputStream(coverFile).use { out -> bitmap.compress(Bitmap.CompressFormat.JPEG, 82, out) }
@@ -128,8 +133,6 @@ class VideoScanner(
             coverFile.absolutePath
         } catch (_: Exception) {
             null
-        } finally {
-            runCatching { retriever.release() }
         }
     }
 
@@ -137,7 +140,12 @@ class VideoScanner(
         return if (parent.isBlank()) name else "$parent/$name"
     }
 
-    private data class VideoMetadata(val durationMs: Long?, val width: Int?, val height: Int?)
+    private data class ScanMetadata(
+        val durationMs: Long?,
+        val width: Int?,
+        val height: Int?,
+        val coverPath: String?
+    )
 
     private fun naturalCompare(a: String, b: String): Int = a.lowercase().compareTo(b.lowercase())
 }

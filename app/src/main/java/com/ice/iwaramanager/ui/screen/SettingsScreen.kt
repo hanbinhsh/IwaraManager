@@ -42,7 +42,9 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.ice.iwaramanager.SettingsUiState
+import com.ice.iwaramanager.data.model.IwaraLoginStatus
 import com.ice.iwaramanager.data.model.IwaraMatchMode
+import com.ice.iwaramanager.data.model.label
 import com.ice.iwaramanager.data.model.LibraryLayoutMode
 import com.ice.iwaramanager.data.model.LibrarySource
 import com.ice.iwaramanager.data.model.LibrarySourceType
@@ -85,9 +87,14 @@ fun SettingsScreen(
     onLayoutModeChange: (LibraryLayoutMode) -> Unit,
     onGridColumnsChange: (Int) -> Unit,
     onShowRematchButtonInListChange: (Boolean) -> Unit,
+    onOpenVideoDirectlyInPlayerChange: (Boolean) -> Unit,
+    onShowGridCoverPlayButtonChange: (Boolean) -> Unit,
     onVideoOpenModeChange: (VideoOpenMode) -> Unit,
     onExternalVideoPlayerChange: (String, String) -> Unit,
     onResetVideoOpenMode: () -> Unit,
+    onOpenIwaraLogin: () -> Unit,
+    onCheckIwaraLoginStatus: () -> Unit,
+    onClearIwaraLoginSession: () -> Unit,
     onIwaraMatchModeChange: (IwaraMatchMode) -> Unit,
     onMatchSearchTimeoutSecondsChange: (String) -> Unit,
     onApiProbeTimeoutSecondsChange: (String) -> Unit,
@@ -128,7 +135,7 @@ fun SettingsScreen(
     ConfirmDialog(
         visible = showClearFolderDialog,
         title = "确认清除当前来源范围？",
-        text = "这会移除当前选择范围内的来源记录，不会删除视频文件。",
+        text = "这会移除当前选择范围内的来源绑定，视频缓存和匹配信息会保留；需要删除缓存时请使用“清理缺失记录”。",
         confirmText = "确认清除",
         onDismiss = { showClearFolderDialog = false },
         onConfirm = {
@@ -139,7 +146,7 @@ fun SettingsScreen(
     ConfirmDialog(
         visible = showCleanupMissingDialog,
         title = "清理缺失记录？",
-        text = "只会删除当前来源范围最近成功扫描未见到的视频记录，以及对应标签、任务和候选；不会删除视频文件。",
+        text = "会删除当前来源范围最近成功扫描未见到的视频记录；在全部范围下，也会删除已解绑来源留下的缓存记录。不会删除视频文件。",
         confirmText = "确认清理",
         onDismiss = { showCleanupMissingDialog = false },
         onConfirm = {
@@ -238,7 +245,9 @@ fun SettingsScreen(
                     state = state,
                     onLayoutModeChange = onLayoutModeChange,
                     onGridColumnsChange = onGridColumnsChange,
-                    onShowRematchButtonInListChange = onShowRematchButtonInListChange
+                    onShowRematchButtonInListChange = onShowRematchButtonInListChange,
+                    onOpenVideoDirectlyInPlayerChange = onOpenVideoDirectlyInPlayerChange,
+                    onShowGridCoverPlayButtonChange = onShowGridCoverPlayButtonChange
                 )
                 2 -> PlaybackSettings(
                     state = state,
@@ -252,6 +261,9 @@ fun SettingsScreen(
                 )
                 3 -> MatchSettings(
                     state = state,
+                    onOpenIwaraLogin = onOpenIwaraLogin,
+                    onCheckIwaraLoginStatus = onCheckIwaraLoginStatus,
+                    onClearIwaraLoginSession = onClearIwaraLoginSession,
                     onIwaraMatchModeChange = onIwaraMatchModeChange,
                     onMatchSearchTimeoutSecondsChange = onMatchSearchTimeoutSecondsChange,
                     onApiProbeTimeoutSecondsChange = onApiProbeTimeoutSecondsChange,
@@ -523,7 +535,7 @@ private fun DirectorySettings(
     )
     ListItem(
         headlineContent = { Text("清理缺失记录") },
-        supportingContent = { Text("删除当前来源范围最近成功扫描未见到的视频记录，不删除视频文件。") },
+        supportingContent = { Text("删除当前来源范围最近成功扫描未见到的视频记录；全部范围会同时清理已解绑来源缓存。") },
         trailingContent = {
             TextButton(
                 onClick = onCleanupMissingRecords,
@@ -533,7 +545,7 @@ private fun DirectorySettings(
     )
     ListItem(
         headlineContent = { Text("清除当前来源范围") },
-        supportingContent = { Text("移除当前选择范围内的来源记录，不会删除视频文件。") },
+        supportingContent = { Text("移除当前选择范围内的来源绑定，视频缓存和匹配信息会保留。") },
         trailingContent = {
             TextButton(
                 onClick = onClearFolder,
@@ -549,7 +561,9 @@ private fun DisplaySettings(
     state: SettingsUiState,
     onLayoutModeChange: (LibraryLayoutMode) -> Unit,
     onGridColumnsChange: (Int) -> Unit,
-    onShowRematchButtonInListChange: (Boolean) -> Unit
+    onShowRematchButtonInListChange: (Boolean) -> Unit,
+    onOpenVideoDirectlyInPlayerChange: (Boolean) -> Unit,
+    onShowGridCoverPlayButtonChange: (Boolean) -> Unit
 ) {
     SectionTitle("主页显示")
     ListItem(
@@ -580,6 +594,16 @@ private fun DisplaySettings(
         headlineContent = { Text("列表显示重匹配按钮") },
         supportingContent = { Text("关闭后，列表模式下已匹配视频不显示重匹配按钮。") },
         trailingContent = { Switch(state.showRematchButtonInList, onShowRematchButtonInListChange) }
+    )
+    ListItem(
+        headlineContent = { Text("点击视频直接播放") },
+        supportingContent = { Text("开启后，在视频库、搜索和目录中点击视频条目会直接进入播放器。") },
+        trailingContent = { Switch(state.openVideoDirectlyInPlayer, onOpenVideoDirectlyInPlayerChange) }
+    )
+    ListItem(
+        headlineContent = { Text("网格封面显示播放按钮") },
+        supportingContent = { Text("开启后，网格模式每个封面右下角显示播放按钮，点击后直接播放。") },
+        trailingContent = { Switch(state.showGridCoverPlayButton, onShowGridCoverPlayButtonChange) }
     )
 }
 
@@ -637,6 +661,9 @@ private fun PlaybackSettings(
 @Composable
 private fun MatchSettings(
     state: SettingsUiState,
+    onOpenIwaraLogin: () -> Unit,
+    onCheckIwaraLoginStatus: () -> Unit,
+    onClearIwaraLoginSession: () -> Unit,
     onIwaraMatchModeChange: (IwaraMatchMode) -> Unit,
     onMatchSearchTimeoutSecondsChange: (String) -> Unit,
     onApiProbeTimeoutSecondsChange: (String) -> Unit,
@@ -653,6 +680,35 @@ private fun MatchSettings(
     onAutoMatchDurationToleranceSecondsChange: (String) -> Unit,
     onAutoMatchSkipNoIdChange: (Boolean) -> Unit
 ) {
+    SectionTitle("Iwara 账号")
+    ListItem(
+        headlineContent = { Text("登录状态：${state.iwaraLoginStatus.label()}") },
+        supportingContent = {
+            Text(
+                text = buildString {
+                    append(state.iwaraLoginMessage ?: "登录后可访问账号可见的视频，匹配搜索和批量任务会复用同一登录态。")
+                    state.iwaraLoginCheckedAt?.let {
+                        append("\n最近检查：")
+                        append(formatSettingsTime(it))
+                    }
+                }
+            )
+        },
+        trailingContent = {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Button(onClick = onOpenIwaraLogin) { Text(if (state.iwaraLoginStatus == IwaraLoginStatus.LoggedIn) "重新登录" else "登录") }
+                TextButton(
+                    onClick = onCheckIwaraLoginStatus,
+                    enabled = state.iwaraLoginStatus != IwaraLoginStatus.Checking
+                ) { Text("检查") }
+                TextButton(
+                    onClick = onClearIwaraLoginSession,
+                    enabled = state.iwaraLoginStatus != IwaraLoginStatus.Checking
+                ) { Text("退出") }
+            }
+        }
+    )
+
     SectionTitle("匹配")
     ListItem(
         headlineContent = { Text("匹配模式") },
@@ -846,7 +902,7 @@ private fun SourceListItem(
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 TextButton(onClick = { onScanSource(source.id) }, enabled = !isScanning) { Text("扫描") }
                 TextButton(onClick = { onEditSource(source) }, enabled = !isScanning) { Text("编辑") }
-                TextButton(onClick = { onDeleteSource(source.id) }, enabled = !isScanning) { Text("删除") }
+                TextButton(onClick = { onDeleteSource(source.id) }, enabled = !isScanning) { Text("解绑") }
             }
         }
     )
@@ -859,6 +915,11 @@ private fun SectionTitle(text: String) {
         style = MaterialTheme.typography.titleMedium,
         modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)
     )
+}
+
+private fun formatSettingsTime(value: Long): String {
+    return java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault())
+        .format(java.util.Date(value))
 }
 
 private fun selectedVideoOpenModeText(state: SettingsUiState): String {

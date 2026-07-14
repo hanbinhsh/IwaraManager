@@ -4,6 +4,7 @@ import com.ice.iwaramanager.data.local.dao.CountItem
 import com.ice.iwaramanager.data.local.entity.MatchCandidateEntity
 import com.ice.iwaramanager.data.local.entity.MatchTaskEntity
 import com.ice.iwaramanager.data.model.FilterTab
+import com.ice.iwaramanager.data.model.IwaraLoginStatus
 import com.ice.iwaramanager.data.model.IwaraMatchMode
 import com.ice.iwaramanager.data.model.IwaraMatchNetworkDefaults
 import com.ice.iwaramanager.data.model.IwaraVideoMeta
@@ -15,12 +16,12 @@ import com.ice.iwaramanager.data.model.MatchTaskFilter
 import com.ice.iwaramanager.data.model.RemotePlaybackDiagnostic
 import com.ice.iwaramanager.data.model.VideoItem
 import com.ice.iwaramanager.data.model.VideoOpenMode
+import com.ice.iwaramanager.data.model.VideoSortMode
 import com.ice.iwaramanager.data.model.WebDavSourceForm
 
 data class LibraryUiState(
     val folderUriString: String? = null,
-    val videos: List<VideoItem> = emptyList(),
-    val filteredVideos: List<VideoItem> = emptyList(),
+    val filteredCount: Int = 0,
     val librarySources: List<LibrarySource> = emptyList(),
     val sourceScopes: List<LibrarySourceScope> = emptyList(),
     val selectedSourceScopeKey: String = ALL_SOURCES_KEY,
@@ -33,6 +34,7 @@ data class LibraryUiState(
 
     val layoutMode: LibraryLayoutMode = LibraryLayoutMode.Grid,
     val gridColumns: Int = 2,
+    val videoSortMode: VideoSortMode = VideoSortMode.NameAsc,
     val filterTab: FilterTab = FilterTab.Tags,
     val selectedTagKeys: Set<String> = emptySet(),
     val selectedAuthorKeys: Set<String> = emptySet(),
@@ -57,7 +59,7 @@ data class LibraryUiState(
 data class SearchUiState(
     val folderUriString: String? = null,
     val query: String = "",
-    val results: List<VideoItem> = emptyList(),
+    val resultCount: Int = 0,
     val error: String? = null
 )
 
@@ -75,6 +77,8 @@ data class SettingsUiState(
     val layoutMode: LibraryLayoutMode = LibraryLayoutMode.Grid,
     val gridColumns: Int = 2,
     val showRematchButtonInList: Boolean = true,
+    val openVideoDirectlyInPlayer: Boolean = false,
+    val showGridCoverPlayButton: Boolean = false,
     val videoOpenMode: VideoOpenMode = VideoOpenMode.InApp,
     val selectedVideoPlayerComponentName: String? = null,
     val selectedVideoPlayerLabel: String? = null,
@@ -99,6 +103,9 @@ data class SettingsUiState(
     val autoMatchDurationToleranceSecondsText: String = "2",
     val autoMatchDurationToleranceSeconds: Int = 2,
     val autoMatchSkipNoId: Boolean = false,
+    val iwaraLoginStatus: IwaraLoginStatus = IwaraLoginStatus.Unknown,
+    val iwaraLoginMessage: String? = null,
+    val iwaraLoginCheckedAt: Long? = null,
     val isScanning: Boolean = false,
     val videoCount: Int = 0,
     val message: String? = null,

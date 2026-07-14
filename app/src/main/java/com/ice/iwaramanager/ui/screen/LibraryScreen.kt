@@ -35,6 +35,7 @@ import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Sort
 import androidx.compose.material.icons.filled.ViewList
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -44,6 +45,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
@@ -62,8 +64,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -72,6 +76,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.paging.compose.LazyPagingItems
 import coil3.compose.AsyncImage
 import com.ice.iwaramanager.LibraryUiState
 import com.ice.iwaramanager.SearchUiState
@@ -84,8 +89,11 @@ import com.ice.iwaramanager.data.model.MainTab
 import com.ice.iwaramanager.data.model.MatchTaskFilter
 import com.ice.iwaramanager.data.model.MatchTaskStatus
 import com.ice.iwaramanager.data.model.VideoItem
+import com.ice.iwaramanager.data.model.VideoSortMode
 import java.io.File
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 private data class DirectoryScrollPosition(
     val index: Int,
@@ -107,9 +115,12 @@ private const val HighlightFadeMillis = 450
 fun LibraryScreen(
     libraryState: LibraryUiState,
     searchState: SearchUiState,
+    libraryItems: LazyPagingItems<VideoItem>,
+    searchItems: LazyPagingItems<VideoItem>,
     selectedTab: MainTab,
     tabReselectTick: Long,
     showRematchButtonInList: Boolean,
+    showGridCoverPlayButton: Boolean,
     highlightedVideoUri: String?,
     onHighlightedVideoConsumed: () -> Unit,
     onSelectTab: (MainTab) -> Unit,
@@ -119,6 +130,7 @@ fun LibraryScreen(
     onOpenSettings: () -> Unit,
     onRescan: () -> Unit,
     onLayoutModeChange: (LibraryLayoutMode) -> Unit,
+    onVideoSortModeChange: (VideoSortMode) -> Unit,
     onQueryChange: (String) -> Unit,
     onClearQuery: () -> Unit,
     onFilterTabChange: (FilterTab) -> Unit,
@@ -133,6 +145,8 @@ fun LibraryScreen(
     onSkipUnqueuedVideo: (VideoItem) -> Unit,
     onRetryMatchTask: (MatchTaskEntity) -> Unit,
     onRetryFailedTasks: () -> Unit,
+    onQueueDurationIssuesForReview: () -> Unit,
+    onRetryNeedReviewTasks: () -> Unit,
     onStartBatchMatch: () -> Unit,
     onStartBatchRematch: () -> Unit,
     onOpenVideo: (VideoItem) -> Unit,
@@ -145,11 +159,12 @@ fun LibraryScreen(
     val filterListState = rememberLazyListState()
     val searchListState = rememberLazyListState()
     val searchGridState = rememberLazyGridState()
-    val taskListState = rememberLazyListState()
+    val taskListState = rememberSaveable(saver = LazyListState.Saver) { LazyListState() }
     val directoryScrollPositions = remember { mutableMapOf<String, DirectoryScrollPosition>() }
     val currentDirectoryKey = directoryStateKey(libraryState)
     var pendingDirectoryRestore by remember { mutableStateOf<DirectoryRestoreRequest?>(null) }
     var highlightedDirectoryFolderKey by remember { mutableStateOf<String?>(null) }
+    var sortMenuExpanded by remember { mutableStateOf(false) }
 
     fun rememberCurrentDirectoryPosition() {
         directoryScrollPositions[currentDirectoryKey] = DirectoryScrollPosition(
@@ -272,6 +287,34 @@ fun LibraryScreen(
                     }
                 },
                 actions = {
+                    Box {
+                        IconButton(onClick = { sortMenuExpanded = true }) {
+                            Icon(Icons.Filled.Sort, contentDescription = "排序")
+                        }
+                        DropdownMenu(
+                            expanded = sortMenuExpanded,
+                            onDismissRequest = { sortMenuExpanded = false }
+                        ) {
+                            VideoSortMode.entries.forEach { mode ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            if (libraryState.videoSortMode == mode) {
+                                                "✓ ${videoSortModeLabel(mode)}"
+                                            } else {
+                                                videoSortModeLabel(mode)
+                                            }
+                                        )
+                                    },
+                                    onClick = {
+                                        sortMenuExpanded = false
+                                        onVideoSortModeChange(mode)
+                                    }
+                                )
+                            }
+                        }
+                    }
+
                     IconButton(
                         onClick = {
                             onLayoutModeChange(
@@ -329,6 +372,7 @@ fun LibraryScreen(
                     .fillMaxSize()
                     .padding(paddingValues),
                 state = libraryState,
+                libraryItems = libraryItems,
                 listState = libraryListState,
                 directoryListState = directoryListState,
                 gridState = libraryGridState,
@@ -339,7 +383,8 @@ fun LibraryScreen(
                 onDirectoryUp = ::navigateDirectoryUpWithPositionRestore,
                 highlightedDirectoryFolderKey = highlightedDirectoryFolderKey,
                 highlightedVideoUri = highlightedVideoUri,
-                showRematchButtonInList = showRematchButtonInList
+                showRematchButtonInList = showRematchButtonInList,
+                showGridCoverPlayButton = showGridCoverPlayButton
             )
 
             MainTab.Filters -> FilterContent(
@@ -361,6 +406,7 @@ fun LibraryScreen(
                     .padding(paddingValues),
                 libraryState = libraryState,
                 searchState = searchState,
+                searchItems = searchItems,
                 listState = searchListState,
                 gridState = searchGridState,
                 onQueryChange = onQueryChange,
@@ -369,6 +415,7 @@ fun LibraryScreen(
                 onMatchVideo = onMatchVideo,
                 onPlayVideo = onPlayVideo,
                 showRematchButtonInList = showRematchButtonInList,
+                showGridCoverPlayButton = showGridCoverPlayButton,
                 highlightedVideoUri = highlightedVideoUri
             )
 
@@ -385,6 +432,8 @@ fun LibraryScreen(
                 onSkipUnqueuedVideo = onSkipUnqueuedVideo,
                 onRetryTask = onRetryMatchTask,
                 onRetryFailedTasks = onRetryFailedTasks,
+                onQueueDurationIssuesForReview = onQueueDurationIssuesForReview,
+                onRetryNeedReviewTasks = onRetryNeedReviewTasks,
                 onStartBatchMatch = onStartBatchMatch,
                 onStartBatchRematch = onStartBatchRematch,
                 onMatchVideo = onMatchVideo
@@ -432,6 +481,7 @@ private fun SourceScopeDropdown(
 private fun LibraryContent(
     modifier: Modifier,
     state: LibraryUiState,
+    libraryItems: LazyPagingItems<VideoItem>,
     listState: LazyListState,
     directoryListState: LazyListState,
     gridState: LazyGridState,
@@ -442,7 +492,8 @@ private fun LibraryContent(
     onDirectoryUp: () -> Unit,
     highlightedDirectoryFolderKey: String?,
     highlightedVideoUri: String?,
-    showRematchButtonInList: Boolean
+    showRematchButtonInList: Boolean,
+    showGridCoverPlayButton: Boolean
 ) {
     Column(modifier = modifier) {
         if (state.isScanning) {
@@ -457,8 +508,7 @@ private fun LibraryContent(
             )
         }
 
-        val videos = state.filteredVideos.ifEmpty { state.videos }
-        ResultCountText("共 ${videos.size} 个视频")
+        ResultCountText("共 ${state.filteredCount} 个视频")
 
         if (state.layoutMode == LibraryLayoutMode.Directory) {
             DirectoryContent(
@@ -473,11 +523,11 @@ private fun LibraryContent(
                 onPlayVideo = onPlayVideo,
                 showRematchButtonInList = showRematchButtonInList
             )
-        } else if (!state.isScanning && videos.isEmpty()) {
+        } else if (!state.isScanning && state.filteredCount == 0) {
             EmptyHint("没有找到视频。")
         } else {
-            VideoShelfContent(
-                videos = videos,
+            VideoShelfContentPaged(
+                items = libraryItems,
                 layoutMode = state.layoutMode,
                 gridColumns = state.gridColumns,
                 listState = listState,
@@ -486,9 +536,52 @@ private fun LibraryContent(
                 onMatchVideo = onMatchVideo,
                 onPlayVideo = onPlayVideo,
                 showRematchButtonInList = showRematchButtonInList,
+                showGridCoverPlayButton = showGridCoverPlayButton,
                 highlightedVideoUri = highlightedVideoUri
             )
         }
+    }
+}
+
+/**
+ * 分页版的列表/网格外壳（仅库列表与搜索使用）；目录视图仍用普通 List。
+ */
+@Composable
+private fun VideoShelfContentPaged(
+    items: LazyPagingItems<VideoItem>,
+    layoutMode: LibraryLayoutMode,
+    gridColumns: Int,
+    listState: LazyListState,
+    gridState: LazyGridState,
+    onOpenVideo: (VideoItem) -> Unit,
+    onMatchVideo: (VideoItem) -> Unit,
+    onPlayVideo: (VideoItem) -> Unit,
+    showRematchButtonInList: Boolean,
+    showGridCoverPlayButton: Boolean,
+    highlightedVideoUri: String?
+) {
+    if (layoutMode == LibraryLayoutMode.Grid) {
+        VideoGridContentPaged(
+            items = items,
+            gridState = gridState,
+            gridColumns = gridColumns,
+            contentPadding = PaddingValues(8.dp),
+            onOpenVideo = onOpenVideo,
+            onPlayVideo = onPlayVideo,
+            showPlayButton = showGridCoverPlayButton,
+            highlightedVideoUri = highlightedVideoUri
+        )
+    } else {
+        VideoListContentPaged(
+            items = items,
+            listState = listState,
+            contentPadding = PaddingValues(bottom = 24.dp),
+            onOpenVideo = onOpenVideo,
+            onMatchVideo = onMatchVideo,
+            onPlayVideo = onPlayVideo,
+            showRematchButtonInList = showRematchButtonInList,
+            highlightedVideoUri = highlightedVideoUri
+        )
     }
 }
 
@@ -667,6 +760,7 @@ private fun SearchContent(
     modifier: Modifier,
     libraryState: LibraryUiState,
     searchState: SearchUiState,
+    searchItems: LazyPagingItems<VideoItem>,
     listState: LazyListState,
     gridState: LazyGridState,
     onQueryChange: (String) -> Unit,
@@ -675,6 +769,7 @@ private fun SearchContent(
     onMatchVideo: (VideoItem) -> Unit,
     onPlayVideo: (VideoItem) -> Unit,
     showRematchButtonInList: Boolean,
+    showGridCoverPlayButton: Boolean,
     highlightedVideoUri: String?
 ) {
     Column(modifier = modifier) {
@@ -689,13 +784,13 @@ private fun SearchContent(
             return
         }
 
-        ResultCountText("共 ${searchState.results.size} 个视频")
+        ResultCountText("共 ${searchState.resultCount} 个视频")
 
-        if (searchState.results.isEmpty()) {
+        if (searchState.resultCount == 0) {
             EmptyHint("没有搜索结果。")
         } else {
-            VideoShelfContent(
-                videos = searchState.results,
+            VideoShelfContentPaged(
+                items = searchItems,
                 layoutMode = libraryState.layoutMode,
                 gridColumns = libraryState.gridColumns,
                 listState = listState,
@@ -704,6 +799,7 @@ private fun SearchContent(
                 onMatchVideo = onMatchVideo,
                 onPlayVideo = onPlayVideo,
                 showRematchButtonInList = showRematchButtonInList,
+                showGridCoverPlayButton = showGridCoverPlayButton,
                 highlightedVideoUri = highlightedVideoUri
             )
         }
@@ -737,55 +833,6 @@ private fun SearchRow(
         ) {
             Text("清除")
         }
-    }
-}
-
-@Composable
-private fun VideoShelfContent(
-    videos: List<VideoItem>,
-    layoutMode: LibraryLayoutMode,
-    gridColumns: Int,
-    listState: LazyListState,
-    gridState: LazyGridState,
-    onOpenVideo: (VideoItem) -> Unit,
-    onMatchVideo: (VideoItem) -> Unit,
-    onPlayVideo: (VideoItem) -> Unit,
-    showRematchButtonInList: Boolean,
-    highlightedVideoUri: String?
-) {
-    when (layoutMode) {
-        LibraryLayoutMode.Directory -> VideoListContent(
-            videos = videos,
-            listState = listState,
-            contentPadding = PaddingValues(bottom = 24.dp),
-            onOpenVideo = onOpenVideo,
-            onMatchVideo = onMatchVideo,
-            onPlayVideo = onPlayVideo,
-            showRematchButtonInList = showRematchButtonInList,
-            highlightedVideoUri = highlightedVideoUri
-        )
-
-        LibraryLayoutMode.List -> VideoListContent(
-            videos = videos,
-            listState = listState,
-            contentPadding = PaddingValues(bottom = 24.dp),
-            onOpenVideo = onOpenVideo,
-            onMatchVideo = onMatchVideo,
-            onPlayVideo = onPlayVideo,
-            showRematchButtonInList = showRematchButtonInList,
-            highlightedVideoUri = highlightedVideoUri
-        )
-
-        LibraryLayoutMode.Grid -> VideoGridContent(
-            videos = videos,
-            gridState = gridState,
-            gridColumns = gridColumns,
-            contentPadding = PaddingValues(8.dp),
-            onOpenVideo = onOpenVideo,
-            onMatchVideo = onMatchVideo,
-            onPlayVideo = onPlayVideo,
-            highlightedVideoUri = highlightedVideoUri
-        )
     }
 }
 
@@ -826,16 +873,27 @@ private fun FilterContent(
     var sortMode by remember(state.filterTab) {
         mutableStateOf(FilterSortMode.CountDesc)
     }
-    val sortedFilterItems = when (sortMode) {
-        FilterSortMode.CountDesc -> filterItems.sortedWith(
-            compareByDescending<CountItem> { it.count }
-                .thenBy { it.label.lowercase() }
-        )
+    // 在后台线程排序，避免标签很多时阻塞切换到本界面的那一帧；
+    // 计算完成前为 null，界面先瞬间进入并显示“加载中”。
+    val sortedFilterItems by produceState<List<CountItem>?>(
+        initialValue = null,
+        filterItems,
+        sortMode
+    ) {
+        value = null
+        value = withContext(Dispatchers.Default) {
+            when (sortMode) {
+                FilterSortMode.CountDesc -> filterItems.sortedWith(
+                    compareByDescending<CountItem> { it.count }
+                        .thenBy { it.label.lowercase() }
+                )
 
-        FilterSortMode.NameAsc -> filterItems.sortedWith(
-            compareBy<CountItem> { it.label.lowercase() }
-                .thenByDescending { it.count }
-        )
+                FilterSortMode.NameAsc -> filterItems.sortedWith(
+                    compareBy<CountItem> { it.label.lowercase() }
+                        .thenByDescending { it.count }
+                )
+            }
+        }
     }
     val selectedCount = state.selectedTagKeys.size +
             state.selectedAuthorKeys.size +
@@ -912,6 +970,7 @@ private fun FilterContent(
                 }
             }
 
+            val readyItems = sortedFilterItems
             if (filterItems.isEmpty()) {
                 item {
                     Text(
@@ -919,13 +978,28 @@ private fun FilterContent(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+            } else if (readyItems == null) {
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Text(
+                            text = "加载中…",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
             } else {
                 item {
                     FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalArrangement = Arrangement.spacedBy(3.dp)
                     ) {
-                        sortedFilterItems.forEach { item ->
+                        readyItems.forEach { item ->
                             val selected = when (state.filterTab) {
                                 FilterTab.Tags -> item.key in state.selectedTagKeys
                                 FilterTab.Authors -> item.key in state.selectedAuthorKeys
@@ -960,6 +1034,19 @@ private enum class FilterSortMode {
     NameAsc
 }
 
+private fun videoSortModeLabel(mode: VideoSortMode): String {
+    return when (mode) {
+        VideoSortMode.NameAsc -> "名称 A-Z"
+        VideoSortMode.NameDesc -> "名称 Z-A"
+        VideoSortMode.FileTimeDesc -> "修改时间 新到旧"
+        VideoSortMode.FileTimeAsc -> "修改时间 旧到新"
+        VideoSortMode.DurationDesc -> "时长 长到短"
+        VideoSortMode.DurationAsc -> "时长 短到长"
+        VideoSortMode.FileSizeDesc -> "文件大小 大到小"
+        VideoSortMode.FileSizeAsc -> "文件大小 小到大"
+    }
+}
+
 @Composable
 private fun MatchTaskContent(
     modifier: Modifier,
@@ -972,6 +1059,8 @@ private fun MatchTaskContent(
     onSkipUnqueuedVideo: (VideoItem) -> Unit,
     onRetryTask: (MatchTaskEntity) -> Unit,
     onRetryFailedTasks: () -> Unit,
+    onQueueDurationIssuesForReview: () -> Unit,
+    onRetryNeedReviewTasks: () -> Unit,
     onStartBatchMatch: () -> Unit,
     onStartBatchRematch: () -> Unit,
     onMatchVideo: (VideoItem) -> Unit
@@ -979,12 +1068,10 @@ private fun MatchTaskContent(
     var showStartBatchDialog by remember { mutableStateOf(false) }
     var showBatchRematchDialog by remember { mutableStateOf(false) }
     val taskVideoByUri = remember(
-        state.videos,
-        state.filteredVideos,
         state.directoryVideos,
         state.unqueuedVideos
     ) {
-        (state.videos + state.filteredVideos + state.directoryVideos + state.unqueuedVideos)
+        (state.directoryVideos + state.unqueuedVideos)
             .associateBy { it.uriString }
     }
     if (showStartBatchDialog) {
@@ -1046,6 +1133,8 @@ private fun MatchTaskContent(
                 isBatchMatching = state.isBatchMatching,
                 onFilterChange = onFilterChange,
                 onRetryFailedTasks = onRetryFailedTasks,
+                onQueueDurationIssuesForReview = onQueueDurationIssuesForReview,
+                onRetryNeedReviewTasks = onRetryNeedReviewTasks,
                 onStartBatchMatch = { showStartBatchDialog = true },
                 onStartBatchRematch = { showBatchRematchDialog = true }
             )
@@ -1075,7 +1164,7 @@ private fun MatchTaskContent(
             if (state.unqueuedVideos.isEmpty()) {
                 item { EmptyTaskText("没有未匹配视频。") }
             } else {
-                items(state.unqueuedVideos) { video ->
+                items(state.unqueuedVideos, key = { it.uriString }) { video ->
                     UnqueuedVideoItem(
                         video = video,
                         onOpen = { onMatchVideo(video) },
@@ -1090,7 +1179,7 @@ private fun MatchTaskContent(
         if (state.matchTasks.isEmpty()) {
             item { EmptyTaskText("没有任务。") }
         } else {
-            items(state.matchTasks) { task ->
+            items(state.matchTasks, key = { it.id }) { task ->
                 val currentVideo = taskVideoByUri[task.videoUriString]
                 MatchTaskItem(
                     task = task,
@@ -1119,6 +1208,8 @@ private fun TaskFilterRow(
     isBatchMatching: Boolean,
     onFilterChange: (MatchTaskFilter) -> Unit,
     onRetryFailedTasks: () -> Unit,
+    onQueueDurationIssuesForReview: () -> Unit,
+    onRetryNeedReviewTasks: () -> Unit,
     onStartBatchMatch: () -> Unit,
     onStartBatchRematch: () -> Unit
 ) {
@@ -1154,6 +1245,18 @@ private fun TaskFilterRow(
                 onClick = onRetryFailedTasks,
                 enabled = !isBatchMatching,
                 text = if (isBatchMatching) "重试中" else "重试失败"
+            )
+            CompactChip(
+                selected = false,
+                onClick = onQueueDurationIssuesForReview,
+                enabled = !isBatchMatching,
+                text = "时长复核"
+            )
+            CompactChip(
+                selected = false,
+                onClick = onRetryNeedReviewTasks,
+                enabled = !isBatchMatching,
+                text = if (isBatchMatching) "重试中" else "重试复核"
             )
             CompactChip(
                 selected = false,

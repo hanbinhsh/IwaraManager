@@ -1,8 +1,13 @@
 package com.ice.iwaramanager.data.repository
 
 import android.content.Context
+import android.database.sqlite.SQLiteDatabase
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
+import androidx.paging.Pager
+import androidx.paging.PagingConfig
+import androidx.paging.PagingData
+import androidx.paging.map
 import androidx.room.withTransaction
 import com.ice.iwaramanager.data.local.AppDatabase
 import com.ice.iwaramanager.data.local.dao.CountItem
@@ -24,6 +29,7 @@ import com.ice.iwaramanager.data.model.MatchTaskFilter
 import com.ice.iwaramanager.data.model.MatchTaskStatus
 import com.ice.iwaramanager.data.model.RemoteIndexMode
 import com.ice.iwaramanager.data.model.VideoItem
+import com.ice.iwaramanager.data.model.VideoSortMode
 import com.ice.iwaramanager.data.remote.WebDavClient
 import com.ice.iwaramanager.domain.parser.IwaraFilenameParser
 import com.ice.iwaramanager.domain.scanner.KnownVideo
@@ -226,12 +232,7 @@ class VideoRepository(context: Context) {
     }
 
     suspend fun deleteSource(sourceId: String) = withContext(Dispatchers.IO) {
-        db.withTransaction {
-            videoDao.deleteBySource(sourceId)
-            matchTaskDao.deleteTasksBySource(sourceId)
-            sourceDao.deleteFoldersForSource(sourceId)
-            sourceDao.deleteSource(sourceId)
-        }
+        sourceDao.deleteSource(sourceId)
         credentialStore.deletePassword(sourceId)
     }
 
@@ -239,54 +240,39 @@ class VideoRepository(context: Context) {
         return videoDao.observeVideos(libraryRootUriString).map { list -> list.map { it.toVideoItem() } }
     }
 
-    fun observeVideosBySourceIds(sourceIds: List<String>): Flow<List<VideoItem>> {
-        return videoDao.observeVideosBySourceIds(sourceIds, sourceIds.size).map { list -> list.map { it.toVideoItem() } }
+    fun observeVideoCountForSourceIds(sourceIds: List<String>): Flow<Int> {
+        return videoDao.observeVideoCountForSourceIds(sourceIds, sourceIds.size)
     }
 
-    fun observeVideosInFolder(sourceId: String, parentPath: String): Flow<List<VideoItem>> {
-        return videoDao.observeVideosInFolder(sourceId, parentPath).map { list -> list.map { it.toVideoItem() } }
-    }
-
-    fun observeChildFolders(sourceId: String, parentPath: String): Flow<List<LibraryFolderNode>> {
-        return sourceDao.observeChildFolders(sourceId, parentPath).map { list -> list.map { it.toNode() } }
-    }
-
-    fun observeFoldersForSourceIds(sourceIds: List<String>): Flow<List<LibraryFolderNode>> {
-        return sourceDao.observeFoldersForSourceIds(sourceIds, sourceIds.size).map { list -> list.map { it.toNode() } }
-    }
-
-    fun observeVideosBySearch(libraryRootUriString: String, query: String): Flow<List<VideoItem>> {
-        return videoDao.observeVideosBySearch(libraryRootUriString, query).map { list -> list.map { it.toVideoItem() } }
-    }
-
-    fun observeVideosBySearchForSourceIds(sourceIds: List<String>, query: String): Flow<List<VideoItem>> {
-        return videoDao.observeVideosBySearchForSourceIds(sourceIds, sourceIds.size, query).map { list -> list.map { it.toVideoItem() } }
-    }
-
-    fun observeVideosByFilters(
-        libraryRootUriString: String,
+    fun pagedVideosByFilters(
+        sourceIds: List<String>,
         tagKeys: Set<String>,
         authorKeys: Set<String>,
-        qualities: Set<String>
-    ): Flow<List<VideoItem>> {
-        return videoDao.observeVideosByFilters(
-            libraryRootUriString = libraryRootUriString,
-            tagKeys = tagKeys.toList(),
-            tagCount = tagKeys.size,
-            authorKeys = authorKeys.toList(),
-            authorKeyCount = authorKeys.size,
-            qualities = qualities.toList(),
-            qualityCount = qualities.size
-        ).map { list -> list.map { it.toVideoItem() } }
+        qualities: Set<String>,
+        sortMode: VideoSortMode
+    ): Flow<PagingData<VideoItem>> {
+        return Pager(PagingConfig(pageSize = PAGE_SIZE, enablePlaceholders = false)) {
+            videoDao.pagingVideosByFiltersForSourceIds(
+                sourceIds = sourceIds,
+                sourceCount = sourceIds.size,
+                tagKeys = tagKeys.toList(),
+                tagCount = tagKeys.size,
+                authorKeys = authorKeys.toList(),
+                authorKeyCount = authorKeys.size,
+                qualities = qualities.toList(),
+                qualityCount = qualities.size,
+                sortMode = sortMode.name
+            )
+        }.flow.map { pagingData -> pagingData.map { it.toVideoItem() } }
     }
 
-    fun observeVideosByFiltersForSourceIds(
+    fun observeFilteredVideoCount(
         sourceIds: List<String>,
         tagKeys: Set<String>,
         authorKeys: Set<String>,
         qualities: Set<String>
-    ): Flow<List<VideoItem>> {
-        return videoDao.observeVideosByFiltersForSourceIds(
+    ): Flow<Int> {
+        return videoDao.observeVideoCountByFiltersForSourceIds(
             sourceIds = sourceIds,
             sourceCount = sourceIds.size,
             tagKeys = tagKeys.toList(),
@@ -295,7 +281,37 @@ class VideoRepository(context: Context) {
             authorKeyCount = authorKeys.size,
             qualities = qualities.toList(),
             qualityCount = qualities.size
-        ).map { list -> list.map { it.toVideoItem() } }
+        )
+    }
+
+    fun pagedVideosBySearch(
+        sourceIds: List<String>,
+        query: String,
+        sortMode: VideoSortMode
+    ): Flow<PagingData<VideoItem>> {
+        return Pager(PagingConfig(pageSize = PAGE_SIZE, enablePlaceholders = false)) {
+            videoDao.pagingVideosBySearchForSourceIds(sourceIds, sourceIds.size, query, sortMode.name)
+        }.flow.map { pagingData -> pagingData.map { it.toVideoItem() } }
+    }
+
+    fun observeSearchVideoCount(sourceIds: List<String>, query: String): Flow<Int> {
+        return videoDao.observeVideoCountBySearchForSourceIds(sourceIds, sourceIds.size, query)
+    }
+
+    fun observeVideosInFolder(
+        sourceId: String,
+        parentPath: String,
+        sortMode: VideoSortMode
+    ): Flow<List<VideoItem>> {
+        return videoDao.observeVideosInFolder(sourceId, parentPath, sortMode.name).map { list -> list.map { it.toVideoItem() } }
+    }
+
+    fun observeChildFolders(sourceId: String, parentPath: String): Flow<List<LibraryFolderNode>> {
+        return sourceDao.observeChildFolders(sourceId, parentPath).map { list -> list.map { it.toNode() } }
+    }
+
+    fun observeFoldersForSourceIds(sourceIds: List<String>): Flow<List<LibraryFolderNode>> {
+        return sourceDao.observeFoldersForSourceIds(sourceIds, sourceIds.size).map { list -> list.map { it.toNode() } }
     }
 
     fun observeTagCounts(libraryRootUriString: String): Flow<List<CountItem>> = tagDao.observeTagCounts(libraryRootUriString)
@@ -335,6 +351,17 @@ class VideoRepository(context: Context) {
 
     suspend fun getRematchableVideosForSourceIds(sourceIds: List<String>): List<VideoItem> {
         return videoDao.getRematchableVideosForSourceIds(sourceIds, sourceIds.size).map { it.toVideoItem() }
+    }
+
+    suspend fun getMatchedVideosWithDurationIssuesForSourceIds(
+        sourceIds: List<String>,
+        toleranceSeconds: Int
+    ): List<VideoItem> {
+        return videoDao.getMatchedVideosWithDurationIssuesForSourceIds(
+            sourceIds = sourceIds,
+            sourceCount = sourceIds.size,
+            toleranceSeconds = toleranceSeconds
+        ).map { it.toVideoItem() }
     }
 
     fun observeMatchTasksByStatuses(libraryRootUriString: String, statuses: List<String>): Flow<List<MatchTaskEntity>> {
@@ -427,6 +454,7 @@ class VideoRepository(context: Context) {
         }
 
         val buffer = mutableListOf<VideoEntity>()
+        val processedUris = hashSetOf<String>()
 
         // 边扫边存：每累积一批就立即写入数据库，扫描中途失败/闪退也能保留已扫描的数据。
         suspend fun flush() {
@@ -436,8 +464,43 @@ class VideoRepository(context: Context) {
         }
 
         val onVideo: suspend (ScannedVideo) -> Unit = { scannedVideo ->
-            buffer += mergeScannedVideo(scannedVideo, oldEntities[scannedVideo.uriString], source, now)
-            if (buffer.size >= SCAN_FLUSH_BATCH_SIZE) flush()
+            val oldBySameUri = oldEntities[scannedVideo.uriString]
+                ?: videoDao.findByUri(scannedVideo.uriString)
+
+            if (oldBySameUri != null) {
+                buffer += mergeScannedVideo(scannedVideo, oldBySameUri, source, now)
+                processedUris += scannedVideo.uriString
+                if (buffer.size >= SCAN_FLUSH_BATCH_SIZE) flush()
+            } else {
+                val movedOld = videoDao.findReusableMovedVideos(
+                    displayName = scannedVideo.displayName,
+                    fileSize = scannedVideo.fileSize,
+                    uriString = scannedVideo.uriString
+                ).filterNot { it.uriString in processedUris }
+                    .singleOrNull()
+
+                if (movedOld == null) {
+                    buffer += mergeScannedVideo(scannedVideo, null, source, now)
+                    if (buffer.size >= SCAN_FLUSH_BATCH_SIZE) flush()
+                } else {
+                    val migrated = mergeScannedVideo(scannedVideo, movedOld, source, now)
+                    db.withTransaction {
+                        videoDao.upsertAll(listOf(migrated))
+                        tagDao.migrateVideoUri(movedOld.uriString, scannedVideo.uriString)
+                        matchTaskDao.migrateVideoUri(
+                            oldUriString = movedOld.uriString,
+                            newUriString = scannedVideo.uriString,
+                            libraryRootUriString = source.id,
+                            displayName = scannedVideo.displayName,
+                            coverFilePath = migrated.coverFilePath,
+                            localDurationMs = migrated.durationMs,
+                            updatedAt = now
+                        )
+                        videoDao.deleteByUris(listOf(movedOld.uriString))
+                    }
+                }
+                processedUris += scannedVideo.uriString
+            }
         }
 
         val folders = when (source.type) {
@@ -562,6 +625,12 @@ class VideoRepository(context: Context) {
     fun observeMatchTask(taskId: Long): Flow<MatchTaskEntity?> = matchTaskDao.observeTask(taskId)
     fun observeCandidatesForTask(taskId: Long): Flow<List<MatchCandidateEntity>> = matchTaskDao.observeCandidatesForTask(taskId)
     suspend fun getTasksByVideoUri(videoUriString: String): List<MatchTaskEntity> = matchTaskDao.getTasksByVideoUri(videoUriString)
+    suspend fun getMatchTasksByStatusesForSourceIds(
+        sourceIds: List<String>,
+        statuses: List<String>
+    ): List<MatchTaskEntity> {
+        return matchTaskDao.getTasksByStatusesForSourceIds(sourceIds, sourceIds.size, statuses)
+    }
 
     suspend fun getNextNeedReviewAfter(task: MatchTaskEntity): MatchTaskEntity? {
         return matchTaskDao.getNextTaskByStatusAfterCursor(
@@ -662,12 +731,21 @@ class VideoRepository(context: Context) {
             deletedCount += deleteVideoRecords(missingUris)
         }
 
-        if (sourceIds.isEmpty() && configuredIds.isNotEmpty()) {
-            val orphanUris = videoDao.getVideoUrisOutsideSourceIds(
-                sourceIds = configuredIds,
-                sourceCount = configuredIds.size
-            )
+        if (sourceIds.isEmpty()) {
+            val orphanUris = if (configuredIds.isEmpty()) {
+                videoDao.getAllVideoUris()
+            } else {
+                videoDao.getVideoUrisOutsideSourceIds(
+                    sourceIds = configuredIds,
+                    sourceCount = configuredIds.size
+                )
+            }
             deletedCount += deleteVideoRecords(orphanUris)
+            if (configuredIds.isEmpty()) {
+                sourceDao.clearFolders()
+            } else {
+                sourceDao.deleteFoldersOutsideSourceIds(configuredIds, configuredIds.size)
+            }
         }
 
         deletedCount
@@ -689,7 +767,9 @@ class VideoRepository(context: Context) {
     }
 
     suspend fun exportDatabaseTo(uri: Uri) = withContext(Dispatchers.IO) {
-        db.openHelper.writableDatabase.query("PRAGMA wal_checkpoint(FULL)").close()
+        db.openHelper.writableDatabase.query("PRAGMA wal_checkpoint(FULL)").use {
+            while (it.moveToNext()) Unit
+        }
         val databaseFile = appContext.getDatabasePath(DATABASE_NAME)
         require(databaseFile.exists()) { "数据库文件不存在" }
         appContext.contentResolver.openOutputStream(uri)?.use { output ->
@@ -698,16 +778,62 @@ class VideoRepository(context: Context) {
     }
 
     suspend fun importDatabaseFrom(uri: Uri) = withContext(Dispatchers.IO) {
+        val databaseFile = appContext.getDatabasePath(DATABASE_NAME)
+        val tempFile = File(databaseFile.parentFile, "iwara_manager_import_tmp.db")
+        val backupFile = File(databaseFile.parentFile, "iwara_manager_import_backup.db")
+
+        tempFile.delete()
+        appContext.contentResolver.openInputStream(uri)?.use { input ->
+            tempFile.outputStream().use { output -> input.copyTo(output) }
+        } ?: error("无法打开导入文件")
+        validateDatabaseFile(tempFile)
+
+        db.openHelper.writableDatabase.query("PRAGMA wal_checkpoint(FULL)").use {
+            while (it.moveToNext()) Unit
+        }
         AppDatabase.closeCurrent()
         try {
-            val databaseFile = appContext.getDatabasePath(DATABASE_NAME)
             databaseFile.parentFile?.mkdirs()
+            backupFile.delete()
+            if (databaseFile.exists()) {
+                databaseFile.copyTo(backupFile, overwrite = true)
+            }
             deleteDatabaseSidecarFiles(databaseFile)
-            appContext.contentResolver.openInputStream(uri)?.use { input ->
-                databaseFile.outputStream().use { output -> input.copyTo(output) }
-            } ?: error("无法打开导入文件")
-        } finally {
+            tempFile.copyTo(databaseFile, overwrite = true)
+            deleteDatabaseSidecarFiles(databaseFile)
             reopenDatabase()
+            db.openHelper.writableDatabase
+            backupFile.delete()
+        } catch (e: Exception) {
+            AppDatabase.closeCurrent()
+            deleteDatabaseSidecarFiles(databaseFile)
+            if (backupFile.exists()) {
+                backupFile.copyTo(databaseFile, overwrite = true)
+                backupFile.delete()
+            } else {
+                databaseFile.delete()
+            }
+            reopenDatabase()
+            throw e
+        } finally {
+            tempFile.delete()
+        }
+    }
+
+    private fun validateDatabaseFile(file: File) {
+        require(file.exists() && file.length() > 0L) { "导入文件为空" }
+        SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { database ->
+            database.rawQuery("PRAGMA integrity_check", emptyArray()).use { cursor ->
+                require(cursor.moveToFirst() && cursor.getString(0).equals("ok", ignoreCase = true)) {
+                    "导入文件不是有效的 SQLite 数据库"
+                }
+            }
+            database.rawQuery(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'video' LIMIT 1",
+                emptyArray()
+            ).use { cursor ->
+                require(cursor.moveToFirst()) { "所选文件不是 IwaraManager 数据库" }
+            }
         }
     }
 
@@ -736,7 +862,7 @@ class VideoRepository(context: Context) {
     }
 
     private fun deleteDatabaseSidecarFiles(databaseFile: File) {
-        listOf(databaseFile, File(databaseFile.path + "-wal"), File(databaseFile.path + "-shm")).forEach { file ->
+        listOf(File(databaseFile.path + "-wal"), File(databaseFile.path + "-shm")).forEach { file ->
             if (file.exists()) file.delete()
         }
     }
@@ -746,5 +872,8 @@ class VideoRepository(context: Context) {
 
         // 边扫边存的批量大小：每扫描到这么多视频就写入一次数据库。
         const val SCAN_FLUSH_BATCH_SIZE = 25
+
+        // Paging 每页大小。
+        const val PAGE_SIZE = 60
     }
 }

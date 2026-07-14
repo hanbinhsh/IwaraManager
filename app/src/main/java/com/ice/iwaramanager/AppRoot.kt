@@ -19,6 +19,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.paging.compose.collectAsLazyPagingItems
 import com.ice.iwaramanager.data.model.MainTab
 import com.ice.iwaramanager.data.model.Routes
 import com.ice.iwaramanager.data.model.VideoItem
@@ -27,6 +28,7 @@ import com.ice.iwaramanager.data.model.LibrarySourceType
 import com.ice.iwaramanager.data.model.VideoOpenMode
 import com.ice.iwaramanager.data.model.VideoPlayerApp
 import com.ice.iwaramanager.ui.screen.DetailScreen
+import com.ice.iwaramanager.ui.screen.IwaraLoginWebViewScreen
 import com.ice.iwaramanager.ui.screen.LibraryScreen
 import com.ice.iwaramanager.ui.screen.PlayerScreen
 import com.ice.iwaramanager.data.remote.WebDavClient
@@ -51,6 +53,8 @@ fun AppRoot(
     val playerState by viewModel.playerState.collectAsState()
     val matchState by viewModel.matchState.collectAsState()
     val matchTaskDetailState by viewModel.matchTaskDetailState.collectAsState()
+    val libraryItems = viewModel.libraryVideos.collectAsLazyPagingItems()
+    val searchItems = viewModel.searchVideos.collectAsLazyPagingItems()
 
     val currentRoute = remember {
         mutableStateOf(Routes.Library)
@@ -70,6 +74,18 @@ fun AppRoot(
 
     val routeBeforeSettings = remember {
         mutableStateOf(Routes.Library)
+    }
+
+    val routeBeforeIwaraLogin = remember {
+        mutableStateOf(Routes.Settings)
+    }
+
+    val routeBeforeWebView = remember {
+        mutableStateOf(Routes.Library)
+    }
+
+    val iwaraWebViewUrl = remember {
+        mutableStateOf("https://www.iwara.tv")
     }
 
     val tabBeforeDetail = remember {
@@ -174,6 +190,14 @@ fun AppRoot(
                 currentRoute.value = routeBeforeSettings.value
             }
 
+            Routes.IwaraLogin -> {
+                currentRoute.value = routeBeforeIwaraLogin.value
+            }
+
+            Routes.IwaraWebView -> {
+                currentRoute.value = routeBeforeWebView.value
+            }
+
             Routes.Match,
             Routes.MatchTaskDetail -> {
                 currentRoute.value = Routes.Library
@@ -192,9 +216,12 @@ fun AppRoot(
             LibraryScreen(
                 libraryState = libraryState,
                 searchState = searchState,
+                libraryItems = libraryItems,
+                searchItems = searchItems,
                 selectedTab = selectedTab.value,
                 tabReselectTick = tabReselectTick.value,
                 showRematchButtonInList = settingsState.showRematchButtonInList,
+                showGridCoverPlayButton = settingsState.showGridCoverPlayButton,
                 highlightedVideoUri = highlightedVideoUri.value,
                 onHighlightedVideoConsumed = {
                     highlightedVideoUri.value = null
@@ -209,6 +236,7 @@ fun AppRoot(
                 },
                 onRescan = viewModel::rescanLibrary,
                 onLayoutModeChange = viewModel::setLibraryLayoutMode,
+                onVideoSortModeChange = viewModel::setVideoSortMode,
                 onQueryChange = viewModel::updateSearchQuery,
                 onClearQuery = viewModel::clearSearchQuery,
                 onFilterTabChange = viewModel::setFilterTab,
@@ -226,13 +254,19 @@ fun AppRoot(
                 onSkipUnqueuedVideo = viewModel::skipUnqueuedVideo,
                 onRetryMatchTask = viewModel::retryMatchTask,
                 onRetryFailedTasks = viewModel::retryFailedMatchTasks,
+                onQueueDurationIssuesForReview = viewModel::queueDurationIssuesForReview,
+                onRetryNeedReviewTasks = viewModel::retryNeedReviewTasks,
                 onStartBatchMatch = viewModel::startBatchMatchUnmatched,
                 onStartBatchRematch = viewModel::startBatchRematchMatched,
                 onOpenVideo = { video ->
-                    pendingDetailVideoUri.value = video.uriString
-                    viewModel.openVideoDetail(video)
-                    tabBeforeDetail.value = selectedTab.value
-                    currentRoute.value = Routes.Detail
+                    if (settingsState.openVideoDirectlyInPlayer) {
+                        playVideo(video, Routes.Library)
+                    } else {
+                        pendingDetailVideoUri.value = video.uriString
+                        viewModel.openVideoDetail(video)
+                        tabBeforeDetail.value = selectedTab.value
+                        currentRoute.value = Routes.Detail
+                    }
                 },
                 onMatchVideo = { video ->
                     viewModel.openMatchVideo(video)
@@ -293,9 +327,17 @@ fun AppRoot(
                 onLayoutModeChange = viewModel::setLibraryLayoutMode,
                 onGridColumnsChange = viewModel::setGridColumns,
                 onShowRematchButtonInListChange = viewModel::setShowRematchButtonInList,
+                onOpenVideoDirectlyInPlayerChange = viewModel::setOpenVideoDirectlyInPlayer,
+                onShowGridCoverPlayButtonChange = viewModel::setShowGridCoverPlayButton,
                 onVideoOpenModeChange = viewModel::setVideoOpenMode,
                 onExternalVideoPlayerChange = viewModel::setExternalVideoPlayer,
                 onResetVideoOpenMode = viewModel::resetVideoOpenMode,
+                onOpenIwaraLogin = {
+                    routeBeforeIwaraLogin.value = Routes.Settings
+                    currentRoute.value = Routes.IwaraLogin
+                },
+                onCheckIwaraLoginStatus = viewModel::checkIwaraLoginStatus,
+                onClearIwaraLoginSession = viewModel::clearIwaraLoginSession,
                 onIwaraMatchModeChange = viewModel::setIwaraMatchMode,
                 onMatchSearchTimeoutSecondsChange = viewModel::setMatchSearchTimeoutSeconds,
                 onApiProbeTimeoutSecondsChange = viewModel::setApiProbeTimeoutSeconds,
@@ -311,6 +353,32 @@ fun AppRoot(
                 onAutoMatchTitleSimilarityThresholdChange = viewModel::setAutoMatchTitleSimilarityThreshold,
                 onAutoMatchDurationToleranceSecondsChange = viewModel::setAutoMatchDurationToleranceSeconds,
                 onAutoMatchSkipNoIdChange = viewModel::setAutoMatchSkipNoId
+            )
+        }
+
+        Routes.IwaraLogin -> {
+            IwaraLoginWebViewScreen(
+                onBack = {
+                    currentRoute.value = routeBeforeIwaraLogin.value
+                },
+                onComplete = {
+                    viewModel.markIwaraLoginCompleted()
+                    currentRoute.value = routeBeforeIwaraLogin.value
+                }
+            )
+        }
+
+        Routes.IwaraWebView -> {
+            IwaraLoginWebViewScreen(
+                onBack = {
+                    currentRoute.value = routeBeforeWebView.value
+                },
+                onComplete = {
+                    currentRoute.value = routeBeforeWebView.value
+                },
+                initialUrl = iwaraWebViewUrl.value,
+                defaultTitle = "Iwara 页面",
+                showCompleteAction = false
             )
         }
 
@@ -356,12 +424,9 @@ fun AppRoot(
                 onOpenWeb = {
                     val query = matchState.query.trim()
                     if (query.isNotBlank()) {
-                        context.startActivity(
-                            Intent(
-                                Intent.ACTION_VIEW,
-                                Uri.parse("https://www.iwara.tv/search?query=${Uri.encode(query)}")
-                            )
-                        )
+                        iwaraWebViewUrl.value = "https://www.iwara.tv/search?query=${Uri.encode(query)}"
+                        routeBeforeWebView.value = Routes.Match
+                        currentRoute.value = Routes.IwaraWebView
                     }
                 },
                 onBind = { meta ->

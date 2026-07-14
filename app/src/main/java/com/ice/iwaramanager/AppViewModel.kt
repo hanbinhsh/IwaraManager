@@ -15,6 +15,7 @@ import com.ice.iwaramanager.data.model.RemoteIndexMode
 import com.ice.iwaramanager.data.model.RemotePlaybackDiagnostic
 import com.ice.iwaramanager.data.local.entity.MatchTaskEntity
 import com.ice.iwaramanager.data.model.FilterTab
+import com.ice.iwaramanager.data.model.IwaraLoginStatus
 import com.ice.iwaramanager.data.model.IwaraMatchMode
 import com.ice.iwaramanager.data.model.IwaraMatchNetworkDefaults
 import com.ice.iwaramanager.data.model.IwaraMatchNetworkOptions
@@ -23,15 +24,23 @@ import com.ice.iwaramanager.data.model.MatchTaskFilter
 import com.ice.iwaramanager.data.model.MatchTaskStatus
 import com.ice.iwaramanager.data.model.VideoItem
 import com.ice.iwaramanager.data.model.VideoOpenMode
+import com.ice.iwaramanager.data.model.VideoSortMode
 import com.ice.iwaramanager.data.model.WebDavSourceForm
+import com.ice.iwaramanager.data.remote.IwaraSessionManager
 import com.ice.iwaramanager.data.repository.IwaraMetadataRepository
 import com.ice.iwaramanager.data.repository.VideoRepository
 import com.ice.iwaramanager.playback.RemotePlaybackProxyService
+import androidx.paging.PagingData
+import androidx.paging.cachedIn
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -53,6 +62,7 @@ class AppViewModel(
 
     private val videoRepository = VideoRepository(app)
     private val iwaraRepository = IwaraMetadataRepository(app)
+    private val iwaraSessionManager = IwaraSessionManager(app)
 
     private val initialFolderUriString = prefs.getString(KEY_FOLDER_URI, null)
 
@@ -66,9 +76,26 @@ class AppViewModel(
     private val initialGridColumns = prefs.getInt(KEY_GRID_COLUMNS, 2)
         .coerceIn(2, 6)
 
+    private val initialVideoSortMode = runCatching {
+        VideoSortMode.valueOf(
+            prefs.getString(KEY_VIDEO_SORT_MODE, VideoSortMode.NameAsc.name)
+                ?: VideoSortMode.NameAsc.name
+        )
+    }.getOrDefault(VideoSortMode.NameAsc)
+
     private val initialShowRematchButtonInList = prefs.getBoolean(
         KEY_SHOW_REMATCH_BUTTON_IN_LIST,
         true
+    )
+
+    private val initialOpenVideoDirectlyInPlayer = prefs.getBoolean(
+        KEY_OPEN_VIDEO_DIRECTLY_IN_PLAYER,
+        false
+    )
+
+    private val initialShowGridCoverPlayButton = prefs.getBoolean(
+        KEY_SHOW_GRID_COVER_PLAY_BUTTON,
+        false
     )
 
     private val initialVideoOpenMode = runCatching {
@@ -183,7 +210,8 @@ class AppViewModel(
             folderUriString = initialFolderUriString,
             selectedSourceScopeKey = initialSelectedSourceScopeKey,
             layoutMode = initialLayoutMode,
-            gridColumns = initialGridColumns
+            gridColumns = initialGridColumns,
+            videoSortMode = initialVideoSortMode
         )
     )
     val libraryState: StateFlow<LibraryUiState> = _libraryState
@@ -206,6 +234,8 @@ class AppViewModel(
             layoutMode = initialLayoutMode,
             gridColumns = initialGridColumns,
             showRematchButtonInList = initialShowRematchButtonInList,
+            openVideoDirectlyInPlayer = initialOpenVideoDirectlyInPlayer,
+            showGridCoverPlayButton = initialShowGridCoverPlayButton,
             videoOpenMode = if (initialVideoOpenMode == VideoOpenMode.ExternalPlayer &&
                 initialVideoPlayerComponentName.isNullOrBlank()
             ) {
@@ -256,10 +286,27 @@ class AppViewModel(
     private val _matchTaskDetailState = MutableStateFlow(MatchTaskDetailUiState())
     val matchTaskDetailState: StateFlow<MatchTaskDetailUiState> = _matchTaskDetailState
 
+    // Paging 查询参数：随来源范围/筛选/搜索词变化，flatMapLatest 切换到新的分页流。
+    private val libraryQueryFlow = MutableStateFlow(LibraryQuery())
+    private val searchQueryFlow = MutableStateFlow(SearchQuery())
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val libraryVideos: Flow<PagingData<VideoItem>> =
+        libraryQueryFlow.flatMapLatest { q ->
+            videoRepository.pagedVideosByFilters(q.sourceIds, q.tagKeys, q.authorKeys, q.qualities, q.sortMode)
+        }.cachedIn(viewModelScope)
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val searchVideos: Flow<PagingData<VideoItem>> =
+        searchQueryFlow.flatMapLatest { q ->
+            if (q.query.isBlank()) flowOf(PagingData.empty())
+            else videoRepository.pagedVideosBySearch(q.sourceIds, q.query, q.sortMode)
+        }.cachedIn(viewModelScope)
+
     private var observeSourcesJob: Job? = null
-    private var observeLibraryJob: Job? = null
-    private var observeSearchJob: Job? = null
-    private var observeFilteredJob: Job? = null
+    private var observeVideoCountJob: Job? = null
+    private var observeSearchCountJob: Job? = null
+    private var observeFilteredCountJob: Job? = null
     private var observeDirectoryFoldersJob: Job? = null
     private var observeDirectoryVideosJob: Job? = null
     private var shouldScrollDirectoryToTop: Boolean = false
@@ -346,7 +393,7 @@ class AppViewModel(
         }
         _searchState.update { it.copy(folderUriString = selected.key) }
         shouldScrollDirectoryToTop = true
-        observeLibrary()
+        observeVideoCount()
         observeFiltersAndTasks()
         observeSearchIfNeeded()
         observeDirectory()
@@ -388,20 +435,32 @@ class AppViewModel(
     }
 
     fun clearSearchQuery() {
-        observeSearchJob?.cancel()
+        observeSearchCountJob?.cancel()
+        searchQueryFlow.value = SearchQuery(
+            sourceIds = currentSourceIds(),
+            query = "",
+            sortMode = _libraryState.value.videoSortMode
+        )
 
         _searchState.update {
             it.copy(
                 query = "",
-                results = emptyList(),
+                resultCount = 0,
                 error = null
             )
         }
     }
 
     fun openVideoDetail(video: VideoItem) {
+        // 先用列表项（轻量，可能缺少简介/标签等大字段）即时显示，
+        // 再按 URI 拉取完整记录补全详情页所需的 remote* 字段。
         _detailState.update {
             it.copy(video = video)
+        }
+        viewModelScope.launch {
+            runCatching { videoRepository.findVideoByUri(video.uriString) }
+                .getOrNull()
+                ?.let { full -> _detailState.update { it.copy(video = full) } }
         }
     }
 
@@ -491,6 +550,20 @@ class AppViewModel(
         }
     }
 
+    fun setVideoSortMode(mode: VideoSortMode) {
+        prefs.edit()
+            .putString(KEY_VIDEO_SORT_MODE, mode.name)
+            .apply()
+
+        _libraryState.update {
+            it.copy(videoSortMode = mode)
+        }
+
+        observeFilteredVideos()
+        observeSearchIfNeeded()
+        observeDirectory()
+    }
+
     fun setShowRematchButtonInList(enabled: Boolean) {
         prefs.edit()
             .putBoolean(KEY_SHOW_REMATCH_BUTTON_IN_LIST, enabled)
@@ -498,6 +571,26 @@ class AppViewModel(
 
         _settingsState.update {
             it.copy(showRematchButtonInList = enabled)
+        }
+    }
+
+    fun setOpenVideoDirectlyInPlayer(enabled: Boolean) {
+        prefs.edit()
+            .putBoolean(KEY_OPEN_VIDEO_DIRECTLY_IN_PLAYER, enabled)
+            .apply()
+
+        _settingsState.update {
+            it.copy(openVideoDirectlyInPlayer = enabled)
+        }
+    }
+
+    fun setShowGridCoverPlayButton(show: Boolean) {
+        prefs.edit()
+            .putBoolean(KEY_SHOW_GRID_COVER_PLAY_BUTTON, show)
+            .apply()
+
+        _settingsState.update {
+            it.copy(showGridCoverPlayButton = show)
         }
     }
 
@@ -543,6 +636,68 @@ class AppViewModel(
                 selectedVideoPlayerComponentName = null,
                 selectedVideoPlayerLabel = null
             )
+        }
+    }
+
+
+    fun checkIwaraLoginStatus() {
+        _settingsState.update {
+            it.copy(
+                iwaraLoginStatus = IwaraLoginStatus.Checking,
+                iwaraLoginMessage = "正在检查 Iwara 登录状态...",
+                iwaraLoginCheckedAt = System.currentTimeMillis()
+            )
+        }
+        viewModelScope.launch {
+            runCatching { iwaraSessionManager.checkLoginStatus() }
+                .onSuccess { snapshot ->
+                    _settingsState.update {
+                        it.copy(
+                            iwaraLoginStatus = snapshot.status,
+                            iwaraLoginMessage = buildString {
+                                append(snapshot.message)
+                                if (snapshot.cookiePresent) {
+                                    append("；Cookie：")
+                                    append(snapshot.cookieNames.joinToString(", "))
+                                }
+                            },
+                            iwaraLoginCheckedAt = snapshot.checkedAt
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _settingsState.update {
+                        it.copy(
+                            iwaraLoginStatus = IwaraLoginStatus.Error,
+                            iwaraLoginMessage = "登录状态检查失败：${error.message ?: error::class.java.simpleName}",
+                            iwaraLoginCheckedAt = System.currentTimeMillis()
+                        )
+                    }
+                }
+        }
+    }
+
+    fun markIwaraLoginCompleted() {
+        iwaraSessionManager.flushCookies()
+        checkIwaraLoginStatus()
+    }
+
+    fun clearIwaraLoginSession() {
+        _settingsState.update {
+            it.copy(
+                iwaraLoginStatus = IwaraLoginStatus.Checking,
+                iwaraLoginMessage = "正在退出 Iwara 登录...",
+                iwaraLoginCheckedAt = System.currentTimeMillis()
+            )
+        }
+        iwaraSessionManager.clearSession {
+            _settingsState.update {
+                it.copy(
+                    iwaraLoginStatus = IwaraLoginStatus.LoggedOut,
+                    iwaraLoginMessage = "已清除 Iwara 登录 Cookie",
+                    iwaraLoginCheckedAt = System.currentTimeMillis()
+                )
+            }
         }
     }
 
@@ -914,7 +1069,7 @@ class AppViewModel(
         viewModelScope.launch {
             runCatching { videoRepository.deleteSource(sourceId) }
                 .onSuccess {
-                    _settingsState.update { it.copy(message = "已删除来源", error = null) }
+                    _settingsState.update { it.copy(message = "已移除来源，视频缓存已保留", error = null) }
                     if (_libraryState.value.selectedSourceScopeKey == sourceScopeKey(sourceId)) {
                         selectSourceScope(ALL_SOURCES_KEY)
                     }
@@ -1139,7 +1294,11 @@ class AppViewModel(
         viewModelScope.launch {
             _matchState.update { it.copy(isBinding = true, error = null) }
             runCatching {
-                val enriched = enrichIwaraMeta(meta)
+                val enriched = enrichIwaraMeta(
+                    meta = meta,
+                    localDurationMs = video.durationMs,
+                    allowLocalDurationFallback = true
+                )
                 videoRepository.bindIwaraMeta(video.uriString, enriched, "manual_matched")
                 upsertSuccessfulMatchTask(
                     video = video,
@@ -1245,7 +1404,11 @@ class AppViewModel(
                     likeCount = candidate.likeCount,
                     rawJson = candidate.rawJson
                 )
-                val enriched = enrichIwaraMeta(meta)
+                val enriched = enrichIwaraMeta(
+                    meta = meta,
+                    localDurationMs = task.localDurationMs,
+                    allowLocalDurationFallback = true
+                )
                 videoRepository.bindIwaraMeta(task.videoUriString, enriched, "manual_matched")
                 videoRepository.replaceCandidatesForTask(task.id, listOf(enriched), enriched.id)
                 videoRepository.updateMatchTask(
@@ -1323,15 +1486,115 @@ class AppViewModel(
 
     fun retryMatchTask(task: MatchTaskEntity) {
         viewModelScope.launch {
-            val video = videoRepository.findVideoByUri(task.videoUriString) ?: return@launch
-            processOneBatchVideo(video, task)
+            retryTaskByBestRoute(task)
         }
     }
 
     fun retryFailedMatchTasks() {
+        if (_libraryState.value.isBatchMatching) return
         viewModelScope.launch {
-            val tasks = _libraryState.value.matchTasks.filter { it.status == MatchTaskStatus.Failed }
-            tasks.forEach { retryMatchTask(it) }
+            val tasks = videoRepository.getMatchTasksByStatusesForSourceIds(
+                currentSourceIds(),
+                listOf(MatchTaskStatus.Failed)
+            )
+            if (tasks.isEmpty()) {
+                _libraryState.update { it.copy(error = "当前范围没有失败任务可重试") }
+                return@launch
+            }
+            _libraryState.update { it.copy(isBatchMatching = true, error = null) }
+            try {
+                // 按设置的并发数限流（默认 1，即逐个重试），避免一次性把所有失败任务
+                // 同时置为“进行中”并发起请求，导致服务器超时或触发 Cloudflare 人机验证。
+                val semaphore = Semaphore(_settingsState.value.batchMatchThreads)
+                coroutineScope {
+                    tasks.map { task ->
+                        async {
+                            semaphore.withPermit {
+                                retryTaskByBestRoute(task)
+                            }
+                        }
+                    }.awaitAll()
+                }
+            } finally {
+                _libraryState.update { it.copy(isBatchMatching = false) }
+            }
+        }
+    }
+
+    fun retryNeedReviewTasks() {
+        if (_libraryState.value.isBatchMatching) return
+        viewModelScope.launch {
+            val tasks = videoRepository.getMatchTasksByStatusesForSourceIds(
+                currentSourceIds(),
+                listOf(MatchTaskStatus.NeedReview)
+            )
+            if (tasks.isEmpty()) {
+                _libraryState.update { it.copy(error = "当前范围没有需复核任务可重试") }
+                return@launch
+            }
+            _libraryState.update { it.copy(isBatchMatching = true, error = null) }
+            try {
+                val semaphore = Semaphore(_settingsState.value.batchMatchThreads)
+                coroutineScope {
+                    tasks.map { task ->
+                        async {
+                            semaphore.withPermit {
+                                retryTaskByBestRoute(task)
+                            }
+                        }
+                    }.awaitAll()
+                }
+                setMatchTaskFilter(MatchTaskFilter.NeedReview)
+            } finally {
+                _libraryState.update { it.copy(isBatchMatching = false) }
+            }
+        }
+    }
+
+    fun queueDurationIssuesForReview() {
+        if (_libraryState.value.isBatchMatching) return
+        viewModelScope.launch {
+            val sourceIds = currentSourceIds()
+            val toleranceSeconds = _settingsState.value.autoMatchDurationToleranceSeconds
+            val videos = videoRepository.getMatchedVideosWithDurationIssuesForSourceIds(
+                sourceIds = sourceIds,
+                toleranceSeconds = toleranceSeconds
+            )
+            if (videos.isEmpty()) {
+                _libraryState.update { it.copy(error = "当前范围没有远程时长未知或不一致的已匹配视频") }
+                return@launch
+            }
+
+            var updated = 0
+            videos.forEach { video ->
+                val id = video.matchedIwaraId?.trim().orEmpty()
+                if (id.isBlank()) return@forEach
+                val task = videoRepository.getTasksByVideoUri(video.uriString).firstOrNull()
+                    ?: videoRepository.getMatchTask(
+                        videoRepository.createMatchTask(
+                            video = video,
+                            libraryRootUriString = video.sourceId,
+                            query = id
+                        )
+                    )
+                    ?: return@forEach
+                val meta = video.toStoredIwaraMeta()
+                val reason = durationReviewReason(video, meta) ?: "远程时长需要复核"
+                videoRepository.replaceCandidatesForTask(task.id, listOf(meta), meta.id)
+                videoRepository.updateMatchTask(
+                    task.copy(
+                        query = id,
+                        status = MatchTaskStatus.NeedReview,
+                        matchedIwaraId = id,
+                        candidateCount = 1,
+                        errorMessage = reason,
+                        updatedAt = System.currentTimeMillis()
+                    )
+                )
+                updated++
+            }
+            setMatchTaskFilter(MatchTaskFilter.NeedReview)
+            _libraryState.update { it.copy(error = "已加入需复核：$updated 条") }
         }
     }
 
@@ -1412,11 +1675,11 @@ class AppViewModel(
             videoRepository.clearAll()
 
             _libraryState.update {
-                it.copy(videos = emptyList())
+                it.copy(filteredCount = 0)
             }
 
             _searchState.update {
-                it.copy(results = emptyList())
+                it.copy(resultCount = 0)
             }
 
             _settingsState.update {
@@ -1458,12 +1721,12 @@ class AppViewModel(
                 videoRepository.importDatabaseFrom(uri)
             }.onSuccess {
                 if (!_libraryState.value.folderUriString.isNullOrBlank()) {
-                    observeLibrary()
+                    observeVideoCount()
                     observeFiltersAndTasks()
                     observeSearchIfNeeded()
                 }
                 _settingsState.update {
-                    it.copy(message = "数据库导入成功", error = null)
+                    it.copy(message = "数据库导入成功；重新扫描后会按文件名和大小恢复绑定", error = null)
                 }
             }.onFailure { error ->
                 _settingsState.update {
@@ -1482,8 +1745,7 @@ class AppViewModel(
             sourceIds.forEach { sourceId -> videoRepository.deleteSource(sourceId) }
             _libraryState.update {
                 it.copy(
-                    videos = emptyList(),
-                    filteredVideos = emptyList(),
+                    filteredCount = 0,
                     directoryFolders = emptyList(),
                     directoryVideos = emptyList(),
                     matchTasks = emptyList(),
@@ -1496,7 +1758,7 @@ class AppViewModel(
                     error = null
                 )
             }
-            _searchState.update { it.copy(query = "", results = emptyList(), error = null) }
+            _searchState.update { it.copy(query = "", resultCount = 0, error = null) }
             _detailState.update { it.copy(video = null) }
             _playerState.update { it.copy(video = null, playbackUriString = null, requestHeaders = emptyMap()) }
         }
@@ -1510,7 +1772,7 @@ class AppViewModel(
                 _settingsState.update {
                     it.copy(message = "已清理 $count 条缺失记录", error = null)
                 }
-                observeLibrary()
+                observeVideoCount()
                 observeFiltersAndTasks()
                 observeSearchIfNeeded()
                 observeDirectory()
@@ -1547,11 +1809,10 @@ class AppViewModel(
                 _settingsState.update {
                     it.copy(
                         librarySources = sources,
-                        folderUriString = sources.firstOrNull { source -> source.type == LibrarySourceType.LocalSaf }?.rootUriString,
-                        videoCount = _libraryState.value.videos.size
+                        folderUriString = sources.firstOrNull { source -> source.type == LibrarySourceType.LocalSaf }?.rootUriString
                     )
                 }
-                observeLibrary()
+                observeVideoCount()
                 observeFiltersAndTasks()
                 observeSearchIfNeeded()
                 observeDirectory()
@@ -1559,26 +1820,36 @@ class AppViewModel(
         }
     }
 
-    private fun observeLibrary() {
-        observeLibraryJob?.cancel()
-        observeLibraryJob = viewModelScope.launch {
-            videoRepository.observeVideosBySourceIds(currentSourceIds()).collect { videos ->
-                _libraryState.update { it.copy(videos = videos) }
-                _settingsState.update { it.copy(videoCount = videos.size) }
+    private fun observeVideoCount() {
+        observeVideoCountJob?.cancel()
+        observeVideoCountJob = viewModelScope.launch {
+            videoRepository.observeVideoCountForSourceIds(currentSourceIds()).collect { count ->
+                _settingsState.update { it.copy(videoCount = count) }
             }
         }
     }
 
     private fun observeSearchIfNeeded() {
         val query = _searchState.value.query.trim()
-        observeSearchJob?.cancel()
+        val sourceIds = currentSourceIds()
+        observeSearchCountJob?.cancel()
         if (query.isBlank()) {
-            _searchState.update { it.copy(results = emptyList(), error = null) }
+            searchQueryFlow.value = SearchQuery(
+                sourceIds = sourceIds,
+                query = "",
+                sortMode = _libraryState.value.videoSortMode
+            )
+            _searchState.update { it.copy(resultCount = 0, error = null) }
             return
         }
-        observeSearchJob = viewModelScope.launch {
-            videoRepository.observeVideosBySearchForSourceIds(currentSourceIds(), query).collect { videos ->
-                _searchState.update { it.copy(results = videos, error = null) }
+        searchQueryFlow.value = SearchQuery(
+            sourceIds = sourceIds,
+            query = query,
+            sortMode = _libraryState.value.videoSortMode
+        )
+        observeSearchCountJob = viewModelScope.launch {
+            videoRepository.observeSearchVideoCount(sourceIds, query).collectLatest { count ->
+                _searchState.update { it.copy(resultCount = count, error = null) }
             }
         }
     }
@@ -1634,14 +1905,24 @@ class AppViewModel(
 
     private fun observeFilteredVideos() {
         val state = _libraryState.value
-        observeFilteredJob?.cancel()
-        observeFilteredJob = viewModelScope.launch {
-            videoRepository.observeVideosByFiltersForSourceIds(
-                sourceIds = currentSourceIds(),
+        val sourceIds = currentSourceIds()
+        // 驱动分页流切换到当前来源/筛选条件
+        libraryQueryFlow.value = LibraryQuery(
+            sourceIds = sourceIds,
+            tagKeys = state.selectedTagKeys,
+            authorKeys = state.selectedAuthorKeys,
+            qualities = state.selectedQualities,
+            sortMode = state.videoSortMode
+        )
+        // 单独观察总数用于“共 N 个视频”显示（分页流本身只知道已加载数量）
+        observeFilteredCountJob?.cancel()
+        observeFilteredCountJob = viewModelScope.launch {
+            videoRepository.observeFilteredVideoCount(
+                sourceIds = sourceIds,
                 tagKeys = state.selectedTagKeys,
                 authorKeys = state.selectedAuthorKeys,
                 qualities = state.selectedQualities
-            ).collectLatest { videos -> _libraryState.update { it.copy(filteredVideos = videos) } }
+            ).collectLatest { count -> _libraryState.update { it.copy(filteredCount = count) } }
         }
     }
 
@@ -1729,7 +2010,7 @@ class AppViewModel(
         observeDirectoryFoldersJob = viewModelScope.launch {
             combine(
                 videoRepository.observeChildFolders(concreteSourceId, path),
-                videoRepository.observeVideosInFolder(concreteSourceId, path)
+                videoRepository.observeVideosInFolder(concreteSourceId, path, state.videoSortMode)
             ) { folders, videos ->
                 folders to videos
             }.collectLatest { (folders, videos) ->
@@ -1795,26 +2076,47 @@ class AppViewModel(
             }
 
             val auto = chooseAutoCandidate(task.query, video, candidates)
+            val reviewReason = candidates.firstOrNull { candidate ->
+                candidate.id == video.sourceVideoId || candidate.id == task.matchedIwaraId
+            }?.let { durationReviewReason(video, it) }
             videoRepository.replaceCandidatesForTask(task.id, candidates, auto?.id)
 
-        if (auto != null) {
-                val enrichedAuto = enrichIwaraMeta(auto)
-                videoRepository.bindIwaraMeta(video.uriString, enrichedAuto, "auto_matched")
-                videoRepository.updateMatchTask(
-                    task.copy(
-                        status = MatchTaskStatus.AutoMatched,
-                        matchedIwaraId = enrichedAuto.id,
-                        candidateCount = candidates.size,
-                        errorMessage = null,
-                        updatedAt = System.currentTimeMillis()
-                    )
+            if (auto != null) {
+                val enrichedAuto = enrichIwaraMeta(
+                    meta = auto,
+                    localDurationMs = video.durationMs,
+                    allowLocalDurationFallback = false
                 )
+                val enrichedReviewReason = durationReviewReason(video, enrichedAuto)
+                if (enrichedReviewReason != null) {
+                    videoRepository.replaceCandidatesForTask(task.id, listOf(enrichedAuto), enrichedAuto.id)
+                    videoRepository.updateMatchTask(
+                        task.copy(
+                            status = MatchTaskStatus.NeedReview,
+                            matchedIwaraId = enrichedAuto.id,
+                            candidateCount = 1,
+                            errorMessage = enrichedReviewReason,
+                            updatedAt = System.currentTimeMillis()
+                        )
+                    )
+                } else {
+                    videoRepository.bindIwaraMeta(video.uriString, enrichedAuto, "auto_matched")
+                    videoRepository.updateMatchTask(
+                        task.copy(
+                            status = MatchTaskStatus.AutoMatched,
+                            matchedIwaraId = enrichedAuto.id,
+                            candidateCount = candidates.size,
+                            errorMessage = null,
+                            updatedAt = System.currentTimeMillis()
+                        )
+                    )
+                }
             } else {
                 videoRepository.updateMatchTask(
                     task.copy(
                         status = MatchTaskStatus.NeedReview,
                         candidateCount = candidates.size,
-                        errorMessage = result.failureReason,
+                        errorMessage = reviewReason ?: result.failureReason ?: "候选需要人工复核",
                         updatedAt = System.currentTimeMillis()
                     )
                 )
@@ -1831,7 +2133,6 @@ class AppViewModel(
             )
         }
     }
-
     private suspend fun processOneMatchedRefresh(
         video: VideoItem,
         task: com.ice.iwaramanager.data.local.entity.MatchTaskEntity,
@@ -1879,9 +2180,28 @@ class AppViewModel(
                 return
             }
 
-            val enriched = enrichIwaraMeta(meta)
-            videoRepository.bindIwaraMeta(video.uriString, enriched, "auto_matched")
+            val enriched = enrichIwaraMeta(
+                meta = meta,
+                localDurationMs = video.durationMs,
+                allowLocalDurationFallback = false
+            )
+            val reviewReason = durationReviewReason(video, enriched)
             videoRepository.replaceCandidatesForTask(task.id, listOf(enriched), enriched.id)
+            if (reviewReason != null) {
+                videoRepository.updateMatchTask(
+                    task.copy(
+                        query = targetId,
+                        status = MatchTaskStatus.NeedReview,
+                        matchedIwaraId = enriched.id,
+                        candidateCount = 1,
+                        errorMessage = reviewReason,
+                        updatedAt = System.currentTimeMillis()
+                    )
+                )
+                return
+            }
+
+            videoRepository.bindIwaraMeta(video.uriString, enriched, "auto_matched")
             videoRepository.updateMatchTask(
                 task.copy(
                     query = targetId,
@@ -1906,6 +2226,28 @@ class AppViewModel(
         }
     }
 
+    private suspend fun retryTaskByBestRoute(task: MatchTaskEntity) {
+        val video = videoRepository.findVideoByUri(task.videoUriString)
+        if (video == null) {
+            videoRepository.updateMatchTask(
+                task.copy(
+                    status = MatchTaskStatus.Failed,
+                    errorMessage = "本地视频记录不存在，无法重试",
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+            return
+        }
+        val id = normalizeIwaraId(task.matchedIwaraId.orEmpty())
+            ?: normalizeIwaraId(video.matchedIwaraId.orEmpty())
+            ?: normalizeIwaraId(task.query)
+            ?: normalizeIwaraId(video.sourceVideoId.orEmpty())
+        if (!id.isNullOrBlank()) {
+            processOneMatchedRefresh(video, task, id)
+        } else {
+            processOneBatchVideo(video, task)
+        }
+    }
     private suspend fun searchByMode(
         video: VideoItem?,
         query: String,
@@ -1947,42 +2289,57 @@ class AppViewModel(
         }
     }
 
-    private suspend fun enrichIwaraMeta(meta: IwaraVideoMeta): IwaraVideoMeta {
-        val needsDetail = meta.authorName.isNullOrBlank() ||
-            meta.authorUsername.isNullOrBlank() ||
-            meta.authorAvatarUrl.isNullOrBlank() ||
-            meta.thumbnailUrl.isNullOrBlank() ||
-            meta.tags.isEmpty() ||
-            meta.description.isNullOrBlank()
-        if (!needsDetail) return meta
-
+    private suspend fun enrichIwaraMeta(
+        meta: IwaraVideoMeta,
+        localDurationMs: Long?,
+        allowLocalDurationFallback: Boolean
+    ): IwaraVideoMeta {
         val detail = runCatching {
             iwaraRepository.fetchById(
                 id = meta.id,
                 timeoutMillis = _settingsState.value.matchSearchTimeoutSeconds * 1000L,
                 options = currentMatchOptions()
             ).videos.firstOrNull { it.id == meta.id }
-        }.getOrNull() ?: return meta
+        }.getOrNull()
 
-        return meta.copy(
-            title = detail.title.ifBlank { meta.title },
-            description = detail.description ?: meta.description,
-            authorId = detail.authorId ?: meta.authorId,
-            authorName = detail.authorName ?: meta.authorName,
-            authorUsername = detail.authorUsername ?: meta.authorUsername,
-            authorAvatarUrl = detail.authorAvatarUrl ?: meta.authorAvatarUrl,
-            thumbnailUrl = detail.thumbnailUrl ?: meta.thumbnailUrl,
-            rating = detail.rating ?: meta.rating,
-            visibility = detail.visibility ?: meta.visibility,
-            createdAt = detail.createdAt ?: meta.createdAt,
-            updatedAt = detail.updatedAt ?: meta.updatedAt,
-            durationSeconds = detail.durationSeconds ?: meta.durationSeconds,
-            likeCount = detail.likeCount ?: meta.likeCount,
-            viewCount = detail.viewCount ?: meta.viewCount,
-            commentCount = detail.commentCount ?: meta.commentCount,
-            tags = if (detail.tags.isNotEmpty()) detail.tags else meta.tags,
-            rawJson = detail.rawJson ?: meta.rawJson
-        )
+        val merged = if (detail == null) {
+            meta
+        } else {
+            val detailHasAuthorIdentity = !detail.authorId.isNullOrBlank() || !detail.authorUsername.isNullOrBlank()
+            meta.copy(
+                title = detail.title.takeIf { it.isNotBlank() } ?: meta.title,
+                description = detail.description.takeIfNotBlank() ?: meta.description,
+                authorId = detail.authorId.takeIfNotBlank() ?: meta.authorId,
+                authorName = if (detailHasAuthorIdentity) {
+                    detail.authorName.takeIfNotBlank()
+                } else {
+                    detail.authorName.takeIfNotBlank() ?: meta.authorName
+                },
+                authorUsername = detail.authorUsername.takeIfNotBlank() ?: meta.authorUsername,
+                authorAvatarUrl = detail.authorAvatarUrl.takeIfNotBlank() ?: meta.authorAvatarUrl,
+                thumbnailUrl = detail.thumbnailUrl.takeIfNotBlank() ?: meta.thumbnailUrl,
+                rating = detail.rating.takeIfNotBlank() ?: meta.rating,
+                visibility = detail.visibility.takeIfNotBlank() ?: meta.visibility,
+                createdAt = detail.createdAt.takeIfNotBlank() ?: meta.createdAt,
+                updatedAt = detail.updatedAt.takeIfNotBlank() ?: meta.updatedAt,
+                durationSeconds = chooseStableDurationSeconds(
+                    candidateSeconds = meta.durationSeconds,
+                    detailSeconds = detail.durationSeconds,
+                    localDurationMs = localDurationMs,
+                    allowLocalDurationFallback = allowLocalDurationFallback
+                ),
+                likeCount = detail.likeCount ?: meta.likeCount,
+                viewCount = detail.viewCount ?: meta.viewCount,
+                commentCount = detail.commentCount ?: meta.commentCount,
+                tags = if (detail.tags.isNotEmpty()) detail.tags else meta.tags,
+                rawJson = detail.rawJson ?: meta.rawJson
+            )
+        }
+        return if (allowLocalDurationFallback) {
+            normalizeDurationForConfirmedBinding(merged, localDurationMs)
+        } else {
+            merged
+        }
     }
 
     private fun chooseAutoCandidate(
@@ -1992,7 +2349,8 @@ class AppViewModel(
     ): IwaraVideoMeta? {
         val id = video.sourceVideoId
         if (!id.isNullOrBlank()) {
-            candidates.firstOrNull { it.id == id }?.let { return it }
+            val idCandidate = candidates.firstOrNull { it.id == id } ?: return null
+            return if (durationReviewReason(video, idCandidate) == null) idCandidate else null
         }
         if (!_settingsState.value.autoMatchSingleHighConfidence || candidates.size != 1) return null
         val candidate = candidates.first()
@@ -2010,16 +2368,102 @@ class AppViewModel(
         }
     }
 
+    private fun durationReviewReason(video: VideoItem, meta: IwaraVideoMeta): String? {
+        val remoteSeconds = meta.durationSeconds?.takeIf { it > 0L }
+            ?: return "远程时长未知，需复核"
+        val localSeconds = localDurationSeconds(video.durationMs) ?: return null
+        val toleranceSeconds = _settingsState.value.autoMatchDurationToleranceSeconds
+        return if (kotlin.math.abs(localSeconds - remoteSeconds) > toleranceSeconds) {
+            "远程时长与本地不一致：本地 ${formatDurationSeconds(localSeconds)}，远程 ${formatDurationSeconds(remoteSeconds)}，需复核"
+        } else {
+            null
+        }
+    }
+
+    private fun normalizeDurationForConfirmedBinding(
+        meta: IwaraVideoMeta,
+        localDurationMs: Long?
+    ): IwaraVideoMeta {
+        val localSeconds = localDurationSeconds(localDurationMs) ?: return meta
+        val remoteSeconds = meta.durationSeconds?.takeIf { it > 0L }
+        val toleranceSeconds = _settingsState.value.autoMatchDurationToleranceSeconds
+        return if (remoteSeconds == null || kotlin.math.abs(localSeconds - remoteSeconds) > toleranceSeconds) {
+            meta.copy(durationSeconds = localSeconds)
+        } else {
+            meta
+        }
+    }
+
+    private fun chooseStableDurationSeconds(
+        candidateSeconds: Long?,
+        detailSeconds: Long?,
+        localDurationMs: Long?,
+        allowLocalDurationFallback: Boolean
+    ): Long? {
+        val localSeconds = localDurationSeconds(localDurationMs)
+        val candidate = candidateSeconds?.takeIf { it > 0L }
+        val detail = detailSeconds?.takeIf { it > 0L }
+        if (localSeconds == null) return detail ?: candidate
+        fun matches(value: Long): Boolean {
+            return kotlin.math.abs(value - localSeconds) <= _settingsState.value.autoMatchDurationToleranceSeconds
+        }
+        return when {
+            detail != null && matches(detail) -> detail
+            candidate != null && matches(candidate) -> candidate
+            allowLocalDurationFallback -> localSeconds
+            candidate != null -> candidate
+            else -> detail
+        }
+    }
+
     private fun durationMatches(
         localDurationMs: Long?,
         remoteDurationSeconds: Long?,
         toleranceSeconds: Int
     ): Boolean {
-        val localSeconds = localDurationMs?.takeIf { it > 0L }?.let { it / 1000L } ?: return false
+        val localSeconds = localDurationSeconds(localDurationMs) ?: return false
         val remoteSeconds = remoteDurationSeconds?.takeIf { it > 0L } ?: return false
         return kotlin.math.abs(localSeconds - remoteSeconds) <= toleranceSeconds
     }
 
+    private fun localDurationSeconds(localDurationMs: Long?): Long? {
+        return localDurationMs?.takeIf { it > 0L }?.let { (it + 500L) / 1000L }
+    }
+
+    private fun formatDurationSeconds(seconds: Long): String {
+        val hours = seconds / 3600L
+        val minutes = (seconds % 3600L) / 60L
+        val secs = seconds % 60L
+        return if (hours > 0L) {
+            "$hours:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}"
+        } else {
+            "$minutes:${secs.toString().padStart(2, '0')}"
+        }
+    }
+
+    private fun String?.takeIfNotBlank(): String? = this?.takeIf { it.isNotBlank() }
+
+    private fun VideoItem.toStoredIwaraMeta(): IwaraVideoMeta {
+        return IwaraVideoMeta(
+            id = matchedIwaraId?.trim().orEmpty(),
+            title = remoteTitle.takeIfNotBlank() ?: title.takeIfNotBlank() ?: displayName,
+            description = remoteDescription.takeIfNotBlank(),
+            authorId = remoteAuthorId.takeIfNotBlank(),
+            authorName = remoteAuthorName.takeIfNotBlank(),
+            authorUsername = remoteAuthorUsername.takeIfNotBlank(),
+            authorAvatarUrl = remoteAuthorAvatarUrl.takeIfNotBlank(),
+            thumbnailUrl = remoteThumbnailUrl.takeIfNotBlank() ?: coverFilePath,
+            rating = remoteRating.takeIfNotBlank(),
+            visibility = remoteVisibility.takeIfNotBlank(),
+            createdAt = remoteCreatedAt.takeIfNotBlank(),
+            updatedAt = remoteUpdatedAt.takeIfNotBlank(),
+            durationSeconds = remoteDurationSeconds,
+            likeCount = remoteLikeCount,
+            viewCount = remoteViewCount,
+            commentCount = remoteCommentCount,
+            rawJson = remoteRawJson
+        )
+    }
     private fun titleSimilarity(a: String, b: String): Int {
         val na = normalizeTitle(a)
         val nb = normalizeTitle(b)
@@ -2077,6 +2521,7 @@ class AppViewModel(
 
     private fun currentMatchOptions(): IwaraMatchNetworkOptions {
         val state = _settingsState.value
+        val loginSnapshot = iwaraSessionManager.cookieSummary()
         val templates = state.apiEndpointTemplates.ifEmpty { IwaraMatchNetworkDefaults.apiEndpointTemplates }
         return IwaraMatchNetworkOptions(
             apiEndpointTemplates = templates,
@@ -2084,7 +2529,11 @@ class AppViewModel(
             apiProbeTimeoutMillis = state.apiProbeTimeoutSeconds * 1000L,
             allowPageFallback = state.allowPageFallback,
             fetchSearchResultDetailsWithApi = state.fetchSearchResultDetailsWithApi,
-            maxSearchApiDetails = state.maxSearchApiDetails
+            maxSearchApiDetails = state.maxSearchApiDetails,
+            loginStatus = state.iwaraLoginStatus.name,
+            loginMessage = state.iwaraLoginMessage,
+            loginCookiePresent = loginSnapshot.first,
+            loginCookieNames = loginSnapshot.second
         )
     }
 
@@ -2145,6 +2594,20 @@ class AppViewModel(
         if (trimmed.isBlank() || trimmed.contains("://")) return trimmed
         return "https://$trimmed"
     }
+
+    private data class LibraryQuery(
+        val sourceIds: List<String> = emptyList(),
+        val tagKeys: Set<String> = emptySet(),
+        val authorKeys: Set<String> = emptySet(),
+        val qualities: Set<String> = emptySet(),
+        val sortMode: VideoSortMode = VideoSortMode.NameAsc
+    )
+
+    private data class SearchQuery(
+        val sourceIds: List<String> = emptyList(),
+        val query: String = "",
+        val sortMode: VideoSortMode = VideoSortMode.NameAsc
+    )
 
     private fun currentSourceIds(): List<String> {
         val state = _libraryState.value
@@ -2214,7 +2677,10 @@ class AppViewModel(
         const val KEY_SHOW_REMOTE_PLAYBACK_DIAGNOSTICS = "show_remote_playback_diagnostics"
         const val KEY_LAYOUT_MODE = "layout_mode"
         const val KEY_GRID_COLUMNS = "grid_columns"
+        const val KEY_VIDEO_SORT_MODE = "video_sort_mode"
         const val KEY_SHOW_REMATCH_BUTTON_IN_LIST = "show_rematch_button_in_list"
+        const val KEY_OPEN_VIDEO_DIRECTLY_IN_PLAYER = "open_video_directly_in_player"
+        const val KEY_SHOW_GRID_COVER_PLAY_BUTTON = "show_grid_cover_play_button"
         const val KEY_VIDEO_OPEN_MODE = "video_open_mode"
         const val KEY_VIDEO_PLAYER_COMPONENT = "video_player_component"
         const val KEY_VIDEO_PLAYER_LABEL = "video_player_label"

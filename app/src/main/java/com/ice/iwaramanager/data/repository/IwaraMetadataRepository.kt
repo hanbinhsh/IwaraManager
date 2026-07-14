@@ -1,11 +1,17 @@
 package com.ice.iwaramanager.data.repository
 
 import android.content.Context
+import android.media.MediaMetadataRetriever
+import android.webkit.CookieManager
 import com.ice.iwaramanager.data.model.IwaraSearchMetaResult
 import com.ice.iwaramanager.data.model.IwaraMatchNetworkOptions
 import com.ice.iwaramanager.data.model.IwaraTagMeta
 import com.ice.iwaramanager.data.model.IwaraVideoMeta
+import com.ice.iwaramanager.data.remote.IwaraSessionManager
 import com.ice.iwaramanager.data.remote.IwaraSearchWebView
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -20,7 +26,7 @@ class IwaraMetadataRepository(
         options: IwaraMatchNetworkOptions = IwaraMatchNetworkOptions()
     ): IwaraSearchMetaResult {
         val raw = searcher.fetchById(id, timeoutMillis, options)
-        return parseSearchResult(raw, id)
+        return parseSearchResult(raw, id, options)
     }
 
     suspend fun searchTitle(
@@ -29,15 +35,29 @@ class IwaraMetadataRepository(
         options: IwaraMatchNetworkOptions = IwaraMatchNetworkOptions()
     ): IwaraSearchMetaResult {
         val raw = searcher.searchByTitle(title, timeoutMillis, options)
-        val searchResult = parseSearchResult(raw, title)
+        val searchResult = parseSearchResult(raw, title, options)
         if (!options.fetchSearchResultDetailsWithApi || searchResult.videos.isEmpty()) {
+            return searchResult
+        }
+
+        val duplicateTitleKeys = searchResult.videos
+            .map { normalizedTitleKey(it.title) }
+            .filter { it.isNotBlank() }
+            .groupingBy { it }
+            .eachCount()
+        val candidatesNeedingDetails = searchResult.videos
+            .filter { candidate ->
+                shouldFetchSearchDetail(candidate, title, duplicateTitleKeys)
+            }
+            .take(options.maxSearchApiDetails)
+        if (candidatesNeedingDetails.isEmpty()) {
             return searchResult
         }
 
         var detailSuccess = 0
         val detailFailures = mutableListOf<String>()
         val detailsById = linkedMapOf<String, IwaraVideoMeta>()
-        searchResult.videos.take(options.maxSearchApiDetails).forEach { candidate ->
+        candidatesNeedingDetails.forEach { candidate ->
             val detailResult = runCatching {
                 fetchById(candidate.id, timeoutMillis, options)
             }.getOrElse { error ->
@@ -58,7 +78,7 @@ class IwaraMetadataRepository(
         }
         val summary = buildString {
             append(searchResult.diagnosticSummary)
-            append("；搜索候选按ID获取详情 $detailSuccess/${minOf(searchResult.videos.size, options.maxSearchApiDetails)}")
+            append("；搜索候选按ID获取详情 $detailSuccess/${candidatesNeedingDetails.size}")
             if (detailFailures.isNotEmpty()) {
                 append("；详情失败 ${detailFailures.size} 个")
             }
@@ -79,9 +99,10 @@ class IwaraMetadataRepository(
         )
     }
 
-    private fun parseSearchResult(
+    private suspend fun parseSearchResult(
         raw: String,
-        query: String
+        query: String,
+        options: IwaraMatchNetworkOptions
     ): IwaraSearchMetaResult {
         val json = runCatching { JSONObject(raw) }.getOrDefault(JSONObject())
         val ids = mutableListOf<String>()
@@ -113,31 +134,57 @@ class IwaraMetadataRepository(
             .contains("/search", ignoreCase = true)
         val pageMeta = json.optJSONObject("pageMeta")
         val usePageMetaForSingleCandidate = candidateIds.size == 1 && !isSearchPage
+        val apiProbeReturnedData = (json.optJSONArray("apiProbeSummaries")?.length() ?: 0) > 0
+        val apiAuthHeader = json.optString("apiAuthHeader")
+            .takeIf { it.isNotBlank() }
 
         val videos = candidateIds.map { id ->
             val candidateMeta = metaById[id]
             val detailMeta = if (usePageMetaForSingleCandidate) pageMeta else null
+            val candidateFromApi = apiProbeReturnedData && candidateMeta != null
+            val fallbackDetailMeta = if (candidateFromApi) null else detailMeta
             val html = json.optString("html")
             val bodyText = json.optString("bodyText")
-            val serializedAuthor = extractSerializedAuthor(html, id)
+            val serializedAuthor = if (candidateFromApi) SerializedAuthor() else extractSerializedAuthor(html, id)
             val authorUsername = firstString(
                 candidateMeta?.optString("authorUsername"),
-                detailMeta?.optString("authorUsername"),
+                fallbackDetailMeta?.optString("authorUsername"),
                 serializedAuthor.username
             )
             val authorId = firstString(
                 candidateMeta?.optString("authorId"),
-                detailMeta?.optString("authorId"),
+                fallbackDetailMeta?.optString("authorId"),
                 serializedAuthor.id
             )?.takeUnless { value ->
                 authorUsername != null && value.equals(authorUsername, ignoreCase = true)
             }
-            val tags = tagsFromJson(candidateMeta, detailMeta).ifEmpty {
-                if (usePageMetaForSingleCandidate) {
+            val tags = tagsFromJson(candidateMeta, fallbackDetailMeta).ifEmpty {
+                if (!candidateFromApi && usePageMetaForSingleCandidate) {
                     extractTags(html, bodyText, id)
                 } else {
                     emptyList()
                 }
+            }
+            val apiDurationSeconds = firstLong(candidateMeta, null, "durationSeconds")
+            val probedDurationSeconds = firstJsonLongValue(
+                json.opt("mediaDurationSeconds"),
+                json.opt("pageVideoDurationSeconds"),
+                json.opt("textDurationSeconds")
+            )?.takeIf { it > 0L && candidateFromApi && candidateIds.size == 1 }
+            val nativeDurationSeconds = if (apiDurationSeconds == null && probedDurationSeconds == null && candidateFromApi) {
+                json.put("nativeMediaDurationProbeStarted", true)
+                val resolved = resolveRemoteDurationSeconds(candidateMeta?.optString("fileUrl"), options, apiAuthHeader)
+                json.put("nativeMediaDurationProbeDone", true)
+                json.put("nativeMediaDurationSeconds", resolved ?: JSONObject.NULL)
+                resolved
+            } else {
+                null
+            }
+            val remoteDurationSeconds = apiDurationSeconds
+                ?: probedDurationSeconds
+                ?: nativeDurationSeconds
+            remoteDurationSeconds?.takeIf { it > 0L }?.let { seconds ->
+                candidateMeta?.put("durationSeconds", seconds)
             }
             IwaraVideoMeta(
                 id = id,
@@ -146,21 +193,21 @@ class IwaraMetadataRepository(
                     query = query,
                     id = id,
                     candidateMeta = candidateMeta,
-                    detailMeta = detailMeta,
+                    detailMeta = fallbackDetailMeta,
                     html = html,
                     allowQueryFallback = !isSearchPage && usePageMetaForSingleCandidate
                 ),
                 description = firstString(
                     candidateMeta?.optString("description"),
-                    detailMeta?.optString("description"),
-                    extractSerializedDescription(html, id)
+                    fallbackDetailMeta?.optString("description"),
+                    if (candidateFromApi) null else extractSerializedDescription(html, id)
                 ),
                 authorId = firstString(
                     authorId
                 ),
                 authorName = firstString(
                     candidateMeta?.optString("authorName"),
-                    detailMeta?.optString("authorName"),
+                    fallbackDetailMeta?.optString("authorName"),
                     serializedAuthor.name
                 ),
                 authorUsername = firstString(
@@ -168,30 +215,30 @@ class IwaraMetadataRepository(
                 ),
                 authorAvatarUrl = firstString(
                     candidateMeta?.optString("authorAvatarUrl"),
-                    detailMeta?.optString("authorAvatarUrl"),
+                    fallbackDetailMeta?.optString("authorAvatarUrl"),
                     serializedAuthor.avatarUrl
                 ),
                 thumbnailUrl = firstString(
                     candidateMeta?.optString("thumbnailUrl"),
-                    detailMeta?.optString("thumbnailUrl"),
-                    extractThumbnail(json.optString("html"))
+                    fallbackDetailMeta?.optString("thumbnailUrl"),
+                    if (candidateFromApi) null else extractThumbnail(json.optString("html"))
                 ),
                 rating = firstString(
                     candidateMeta?.optString("rating"),
-                    detailMeta?.optString("rating"),
-                    extractSerializedRating(html, id),
-                    extractRating(bodyText)
+                    fallbackDetailMeta?.optString("rating"),
+                    if (candidateFromApi) null else extractSerializedRating(html, id),
+                    if (candidateFromApi) null else extractRating(bodyText)
                 ),
                 visibility = firstString(
                     candidateMeta?.optString("visibility"),
-                    detailMeta?.optString("visibility"),
-                    extractSerializedVisibility(html, id),
-                    extractVisibility(bodyText)
+                    fallbackDetailMeta?.optString("visibility"),
+                    if (candidateFromApi) null else extractSerializedVisibility(html, id),
+                    if (candidateFromApi) null else extractVisibility(bodyText)
                 ),
                 createdAt = firstString(
                     candidateMeta?.optString("createdAt"),
-                    detailMeta?.optString("createdAt"),
-                    extractSerializedDate(
+                    fallbackDetailMeta?.optString("createdAt"),
+                    if (candidateFromApi) null else extractSerializedDate(
                         html,
                         id,
                         "createdAt",
@@ -205,20 +252,23 @@ class IwaraMetadataRepository(
                 ),
                 updatedAt = firstString(
                     candidateMeta?.optString("updatedAt"),
-                    detailMeta?.optString("updatedAt"),
-                    extractSerializedDate(html, id, "updatedAt", "updated_at", "modifiedAt", "modified_at")
+                    fallbackDetailMeta?.optString("updatedAt"),
+                    if (candidateFromApi) null else extractSerializedDate(html, id, "updatedAt", "updated_at", "modifiedAt", "modified_at")
                 ),
-                durationSeconds = firstLong(candidateMeta, detailMeta, "durationSeconds")
-                    ?: extractSerializedDurationSeconds(html, id)
-                    ?: extractDurationSeconds(bodyText),
-                likeCount = firstInt(candidateMeta, detailMeta, "likeCount")
-                    ?: extractSerializedInt(html, id, "likeCount", "like_count", "likes", "numLikes", "num_likes"),
-                viewCount = firstInt(candidateMeta, detailMeta, "viewCount")
-                    ?: extractSerializedInt(html, id, "viewCount", "view_count", "views", "numViews", "num_views"),
-                commentCount = firstInt(candidateMeta, detailMeta, "commentCount")
-                    ?: extractSerializedInt(html, id, "commentCount", "comment_count", "comments", "numComments", "num_comments"),
+                durationSeconds = remoteDurationSeconds ?: if (candidateFromApi) {
+                    null
+                } else {
+                    firstLong(null, fallbackDetailMeta, "durationSeconds")
+                        ?: extractSerializedDurationSeconds(html, id)
+                },
+                likeCount = firstInt(candidateMeta, fallbackDetailMeta, "likeCount")
+                    ?: if (candidateFromApi) null else extractSerializedInt(html, id, "likeCount", "like_count", "likes", "numLikes", "num_likes"),
+                viewCount = firstInt(candidateMeta, fallbackDetailMeta, "viewCount")
+                    ?: if (candidateFromApi) null else extractSerializedInt(html, id, "viewCount", "view_count", "views", "numViews", "num_views"),
+                commentCount = firstInt(candidateMeta, fallbackDetailMeta, "commentCount")
+                    ?: if (candidateFromApi) null else extractSerializedInt(html, id, "commentCount", "comment_count", "comments", "numComments", "num_comments"),
                 tags = tags,
-                rawJson = raw
+                rawJson = compactSearchJson(json).toString(2)
             )
         }
 
@@ -236,7 +286,7 @@ class IwaraMetadataRepository(
 
         val diagnosticRaw = JSONObject()
             .put("query", query)
-            .put("search", json)
+            .put("search", compactSearchJson(json))
             .put("candidateIds", JSONArray(candidateIds))
             .put("metaSuccessIds", JSONArray(videos.map { it.id }))
             .put("failureReason", failure)
@@ -251,15 +301,187 @@ class IwaraMetadataRepository(
         )
     }
 
+    private fun firstJsonLongValue(vararg values: Any?): Long? {
+        values.forEach { value ->
+            val parsed = when (value) {
+                null, JSONObject.NULL -> null
+                is Number -> value.toLong()
+                is String -> value.toLongOrNull()
+                else -> null
+            }
+            if (parsed != null && parsed > 0L) return parsed
+        }
+        return null
+    }
+    private suspend fun resolveRemoteDurationSeconds(
+        fileUrl: String?,
+        options: IwaraMatchNetworkOptions,
+        apiAuthHeader: String?
+    ): Long? {
+        val url = normalizeMediaUrl(fileUrl?.takeIf { it.isNotBlank() } ?: return null)
+        val timeoutMillis = options.apiProbeTimeoutMillis.coerceIn(5_000L, 120_000L)
+        return withContext(Dispatchers.IO) {
+            withTimeoutOrNull(timeoutMillis) {
+                val retriever = MediaMetadataRetriever()
+                try {
+                    retriever.setDataSource(url, mediaRequestHeaders(url, options, apiAuthHeader))
+                    retriever
+                        .extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+                        ?.toLongOrNull()
+                        ?.takeIf { it > 0L }
+                        ?.let { (it + 500L) / 1000L }
+                } catch (_: Throwable) {
+                    null
+                } finally {
+                    runCatching { retriever.release() }
+                }
+            }
+        }
+    }
+
+    private fun normalizeMediaUrl(value: String): String = when {
+        value.startsWith("//") -> "https:$value"
+        value.startsWith("/") -> "https://api.iwara.tv$value"
+        else -> value
+    }
+
+    private fun mediaRequestHeaders(
+        mediaUrl: String,
+        options: IwaraMatchNetworkOptions,
+        apiAuthHeader: String?
+    ): Map<String, String> {
+        val forbidden = setOf(
+            "accept-charset",
+            "accept-encoding",
+            "access-control-request-headers",
+            "access-control-request-method",
+            "connection",
+            "content-length",
+            "cookie",
+            "date",
+            "dnt",
+            "expect",
+            "host",
+            "keep-alive",
+            "origin",
+            "permissions-policy",
+            "referer",
+            "set-cookie",
+            "te",
+            "trailer",
+            "transfer-encoding",
+            "upgrade",
+            "via"
+        )
+        val headers = linkedMapOf(
+            "User-Agent" to IwaraSessionManager.USER_AGENT,
+            "Referer" to "https://www.iwara.tv/"
+        )
+        options.apiRequestHeaders.forEach { (name, value) ->
+            val normalizedName = name.trim()
+            val normalizedValue = value.trim()
+            if (
+                normalizedName.isNotBlank() &&
+                normalizedValue.isNotBlank() &&
+                normalizedName.lowercase() !in forbidden
+            ) {
+                headers[normalizedName] = normalizedValue
+            }
+        }
+        apiAuthHeader
+            ?.takeIf { it.isNotBlank() }
+            ?.let { headers["Authorization"] = it }
+        cookieHeaderFor(mediaUrl)
+            ?.let { headers["Cookie"] = it }
+        return headers
+    }
+
+    private fun cookieHeaderFor(mediaUrl: String): String? {
+        val cookieManager = CookieManager.getInstance()
+        val cookies = listOf(
+            "https://www.iwara.tv",
+            "https://api.iwara.tv",
+            mediaUrl
+        ).mapNotNull { url ->
+            runCatching { cookieManager.getCookie(url) }.getOrNull()
+        }
+            .flatMap { it.split(";") }
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+        return cookies.takeIf { it.isNotEmpty() }?.joinToString("; ")
+    }
+
+    private fun compactSearchJson(json: JSONObject): JSONObject {
+        val result = JSONObject(json.toString())
+        result.remove("apiAuthHeader")
+        result.remove("apiAuthToken")
+        result.remove("nativeAuthHeader")
+        result.remove("bodyText")
+        result.remove("html")
+        result.optJSONArray("results")?.let { array ->
+            for (index in 0 until array.length()) {
+                array.optJSONObject(index)?.let { item ->
+                    item.remove("fileUrl")
+                    item.remove("apiAuthHeader")
+                    item.remove("apiAuthToken")
+                    item.remove("nativeAuthHeader")
+                }
+            }
+            if (array.length() > 0) {
+                result.remove("pageMeta")
+            }
+        }
+        result.put(
+            "apiProbeSummaries",
+            compactApiSummaries(result.optJSONArray("apiProbeSummaries"))
+        )
+        return result
+    }
+
+    private fun compactApiSummaries(array: JSONArray?): JSONArray {
+        if (array == null) return JSONArray()
+        val seen = linkedSetOf<String>()
+        val compact = JSONArray()
+        for (index in 0 until array.length()) {
+            val item = array.optJSONObject(index) ?: continue
+            val key = item.optString("videoId")
+                .ifBlank { item.optString("url") }
+                .ifBlank { index.toString() }
+            if (!seen.add(key)) continue
+            compact.put(
+                JSONObject()
+                    .put("url", item.optString("url"))
+                    .put("videoId", item.optString("videoId"))
+                    .put("title", item.optString("title"))
+                    .put("rating", item.optString("rating"))
+                    .put("visibility", item.optString("visibility"))
+                    .put("createdAt", item.optString("createdAt"))
+                    .put("updatedAt", item.optString("updatedAt"))
+                    .put("fileDuration", item.opt("fileDuration") ?: JSONObject.NULL)
+                    .put("fileUrlPresent", item.optBoolean("fileUrlPresent"))
+                    .put("userId", item.optString("userId"))
+                    .put("userName", item.optString("userName"))
+                    .put("userUsername", item.optString("userUsername"))
+                    .put("tagCount", item.optInt("tagCount"))
+                    .put("rootKeys", item.optJSONArray("rootKeys") ?: JSONArray())
+                    .put("fileKeys", item.optJSONArray("fileKeys") ?: JSONArray())
+                    .put("userKeys", item.optJSONArray("userKeys") ?: JSONArray())
+            )
+        }
+        return compact
+    }
+
     private fun mergeSearchCandidateWithDetail(
         candidate: IwaraVideoMeta,
         detail: IwaraVideoMeta
     ): IwaraVideoMeta {
+        val detailHasAuthorIdentity = !detail.authorId.isNullOrBlank() || !detail.authorUsername.isNullOrBlank()
         return candidate.copy(
             title = detail.title.ifBlank { candidate.title },
             description = detail.description ?: candidate.description,
             authorId = detail.authorId ?: candidate.authorId,
-            authorName = detail.authorName ?: candidate.authorName,
+            authorName = if (detailHasAuthorIdentity) detail.authorName else detail.authorName ?: candidate.authorName,
             authorUsername = detail.authorUsername ?: candidate.authorUsername,
             authorAvatarUrl = detail.authorAvatarUrl ?: candidate.authorAvatarUrl,
             thumbnailUrl = detail.thumbnailUrl ?: candidate.thumbnailUrl,
@@ -274,6 +496,47 @@ class IwaraMetadataRepository(
             tags = if (detail.tags.isNotEmpty()) detail.tags else candidate.tags,
             rawJson = detail.rawJson ?: candidate.rawJson
         )
+    }
+
+    private fun shouldFetchSearchDetail(
+        candidate: IwaraVideoMeta,
+        query: String,
+        duplicateTitleKeys: Map<String, Int>
+    ): Boolean {
+        if (candidate.id.isNotBlank()) return true
+        if (candidate.durationSeconds == null || candidate.durationSeconds <= 0L) return true
+        val titleKey = normalizedTitleKey(candidate.title)
+        if (titleKey.isBlank()) return true
+        if (titleKey == normalizedTitleKey(candidate.id)) return true
+        val authorNameKey = normalizedTitleKey(candidate.authorName)
+        val authorUsernameKey = normalizedTitleKey(candidate.authorUsername)
+        if (authorNameKey.isNotBlank() && (titleKey == authorNameKey || authorNameKey.contains(titleKey))) return true
+        if (authorUsernameKey.isNotBlank() && (titleKey == authorUsernameKey || authorUsernameKey.contains(titleKey))) return true
+        if ((duplicateTitleKeys[titleKey] ?: 0) > 1) return true
+        if (looksLikeMetadataTitle(candidate.title)) return true
+        return false
+    }
+
+    private fun normalizedTitleKey(value: String?): String {
+        return value
+            ?.replace(Regex("\\s+"), " ")
+            ?.trim()
+            ?.lowercase()
+            .orEmpty()
+    }
+
+    private fun looksLikeMetadataTitle(value: String?): Boolean {
+        val text = value?.trim().orEmpty()
+        if (text.isBlank()) return true
+        if (Regex("^(search|loading|iwara|error|404|not found|videos?|images?|upload|uploads|latest|popular|profile|login|settings)$", RegexOption.IGNORE_CASE).matches(text)) return true
+        if (Regex("\\b\\d+\\s*(s|sec|secs|seconds?|m|min|mins|minutes?|h|hr|hrs|hours?|mo\\.?|mos|months?|y|yr|yrs|years?)\\s+ago\\b", RegexOption.IGNORE_CASE).containsMatchIn(text)) return true
+        if (text.contains("ago", ignoreCase = true) &&
+            Regex("\\b(\\d+([,.]\\d+)?k?|[0-9]{1,2}:[0-9]{2})\\b", RegexOption.IGNORE_CASE).containsMatchIn(text)
+        ) return true
+        if (Regex("\\b[0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?\\b").containsMatchIn(text) &&
+            Regex("\\b(views?|likes?|comments?|\\d+([,.]\\d+)?k?)\\b", RegexOption.IGNORE_CASE).containsMatchIn(text)
+        ) return true
+        return false
     }
 
     private fun isBlockingFailure(json: JSONObject): Boolean {

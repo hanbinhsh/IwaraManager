@@ -5,6 +5,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.aspectRatio
@@ -23,6 +24,8 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material3.Icon
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
@@ -37,6 +40,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.paging.compose.LazyPagingItems
+import androidx.paging.compose.itemKey
 import coil3.compose.AsyncImage
 import com.ice.iwaramanager.data.model.VideoItem
 import java.io.File
@@ -44,8 +49,8 @@ import java.io.File
 private const val HighlightFadeMillis = 450
 
 @Composable
-fun VideoListContent(
-    videos: List<VideoItem>,
+fun VideoListContentPaged(
+    items: LazyPagingItems<VideoItem>,
     listState: LazyListState,
     contentPadding: PaddingValues,
     onOpenVideo: (VideoItem) -> Unit,
@@ -59,36 +64,33 @@ fun VideoListContent(
         contentPadding = contentPadding
     ) {
         items(
-            items = videos,
-            key = { it.uriString }
-        ) { video ->
-            VideoListItem(
-                video = video,
-                onClick = {
-                    onOpenVideo(video)
-                },
-                onPlay = {
-                    onPlayVideo(video)
-                },
-                onMatch = {
-                    onMatchVideo(video)
-                },
-                showRematchButton = video.matchedIwaraId == null || showRematchButtonInList,
-                highlighted = highlightedVideoUri == video.uriString
-            )
+            count = items.itemCount,
+            key = items.itemKey { it.uriString }
+        ) { index ->
+            val video = items[index]
+            if (video != null) {
+                VideoListItem(
+                    video = video,
+                    onClick = { onOpenVideo(video) },
+                    onPlay = { onPlayVideo(video) },
+                    onMatch = { onMatchVideo(video) },
+                    showRematchButton = video.matchedIwaraId == null || showRematchButtonInList,
+                    highlighted = highlightedVideoUri == video.uriString
+                )
+            }
         }
     }
 }
 
 @Composable
-fun VideoGridContent(
-    videos: List<VideoItem>,
+fun VideoGridContentPaged(
+    items: LazyPagingItems<VideoItem>,
     gridState: LazyGridState,
     gridColumns: Int,
     contentPadding: PaddingValues,
     onOpenVideo: (VideoItem) -> Unit,
-    onMatchVideo: (VideoItem) -> Unit,
     onPlayVideo: (VideoItem) -> Unit,
+    showPlayButton: Boolean,
     highlightedVideoUri: String? = null
 ) {
     LazyVerticalGrid(
@@ -99,16 +101,19 @@ fun VideoGridContent(
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         items(
-            items = videos,
-            key = { it.uriString }
-        ) { video ->
-            VideoGridItem(
-                video = video,
-                highlighted = highlightedVideoUri == video.uriString,
-                onClick = {
-                    onOpenVideo(video)
-                }
-            )
+            count = items.itemCount,
+            key = items.itemKey { it.uriString }
+        ) { index ->
+            val video = items[index]
+            if (video != null) {
+                VideoGridItem(
+                    video = video,
+                    highlighted = highlightedVideoUri == video.uriString,
+                    onClick = { onOpenVideo(video) },
+                    onPlayClick = { onPlayVideo(video) },
+                    showPlayButton = showPlayButton
+                )
+            }
         }
     }
 }
@@ -169,7 +174,9 @@ private fun VideoListItem(
 private fun VideoGridItem(
     video: VideoItem,
     highlighted: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onPlayClick: () -> Unit,
+    showPlayButton: Boolean
 ) {
     val overlayColor = animatedHighlightOverlayColor(highlighted)
 
@@ -191,6 +198,26 @@ private fun VideoGridItem(
                 .fillMaxSize()
                 .background(overlayColor)
         )
+
+        if (showPlayButton) {
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(8.dp)
+                    .size(36.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.94f))
+                    .clickable(onClick = onPlayClick)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.PlayArrow,
+                    contentDescription = "直接播放",
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
     }
 }
 

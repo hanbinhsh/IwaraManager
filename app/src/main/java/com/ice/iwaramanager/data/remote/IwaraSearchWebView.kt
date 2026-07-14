@@ -26,6 +26,7 @@ class IwaraSearchWebView(
     context: Context
 ) {
     private val appContext = context.applicationContext
+    private val sessionManager = IwaraSessionManager(appContext)
 
     suspend fun fetchById(
         id: String,
@@ -78,6 +79,7 @@ class IwaraSearchWebView(
             val apiRequestHeadersJson = JSONObject(options.apiRequestHeaders).toString()
             val apiProbeTimeoutMillis = options.apiProbeTimeoutMillis.coerceIn(5_000L, 120_000L)
             val allowPageFallback = options.allowPageFallback
+            val loginCookieSnapshot = sessionManager.cookieSummary()
 
             fun finish(timedOut: Boolean) {
                 if (completed) return
@@ -94,7 +96,7 @@ class IwaraSearchWebView(
                       function usefulTitle(value) {
                         var text = cleanText(value);
                         if (!text) return '';
-                        if (/^(search|loading|iwara|error|404|not found)$/i.test(text)) return '';
+                        if (/^(search|loading|iwara|error|404|not found|videos?|images?|upload|uploads|latest|popular|profile|login|settings)$/i.test(text)) return '';
                         if (/^(views?|likes?|comments?|seconds?|minutes?)\b/i.test(text)) return '';
                         if (/^\d+([,.]\d+)?\s*(views?|likes?|comments?)$/i.test(text)) return '';
                         if (/\b\d+\s*(s|sec|secs|seconds?|m|min|mins|minutes?|h|hr|hrs|hours?|mo\.?|mos|months?|y|yr|yrs|years?)\s+ago\b/i.test(text)) return '';
@@ -207,6 +209,7 @@ class IwaraSearchWebView(
                       function cleanAuthorName(value, username) {
                         var text = cleanText(value);
                         if (!text) return '';
+                        if (/^(my profile|profile|settings|account|logout|log out)$/i.test(text)) return '';
                         if (username) {
                           text = text
                             .replace(new RegExp('@?' + username.replace(/[.*+?^${'$'}{}()|[\]\\]/g, '\\$&'), 'ig'), ' ')
@@ -216,6 +219,26 @@ class IwaraSearchWebView(
                         text = text.replace(/^(by|author|creator|profile)\s*[:：]?\s*/i, '').trim();
                         return text && !/^user\d+$/i.test(text) ? text : '';
                       }
+                      function videoContentRoot() {
+                        var titleNode = document.querySelector('main h1, main h2, [role="main"] h1, [role="main"] h2, h1, h2, [data-testid*="title"]');
+                        var fallback = document.querySelector('main, [role="main"]') || document.body || document;
+                        if (!titleNode) return fallback;
+                        var node = titleNode;
+                        var best = titleNode.parentElement || titleNode;
+                        var steps = 0;
+                        while (node && node !== document.body && steps < 8) {
+                          var text = cleanText(node.innerText || node.textContent || '');
+                          var hasAuthor = !!(node.querySelector && node.querySelector('a[href*="/profile/"], a[href*="/user/"], a[href*="/users/"], a[href*="/channel/"], a[href*="/channels/"]'));
+                          var hasTags = !!(node.querySelector && node.querySelector('a[href*="/videos?"][href*="tag"], a[href*="/tag"], a[href*="/tags"]'));
+                          var hasDescription = !!(node.querySelector && node.querySelector('[class*="description"], [data-testid*="description"]'));
+                          var videoLinks = node.querySelectorAll ? node.querySelectorAll('a[href*="/video/"]').length : 0;
+                          if (hasAuthor || hasTags || hasDescription) best = node;
+                          if (text.length > 900 && videoLinks > 6) break;
+                          node = node.parentElement;
+                          steps++;
+                        }
+                        return best || fallback;
+                      }
                       function authorFrom(root) {
                         root = root || document;
                         var links = Array.prototype.slice.call(root.querySelectorAll('a[href]'));
@@ -224,7 +247,9 @@ class IwaraSearchWebView(
                           var href = links[i].href || links[i].getAttribute('href') || '';
                           var username = usernameFromHref(href);
                           if (!username) continue;
+                          if (links[i].closest('nav, header, [class*="navbar"], [class*="navigation"], [class*="dropdown"], [class*="menu"], [class*="account"]')) continue;
                           var raw = links[i].innerText || links[i].textContent || links[i].getAttribute('title') || links[i].getAttribute('aria-label') || '';
+                          if (/^\s*(my profile|profile|settings|account|logout|log out)\s*$/i.test(raw || '')) continue;
                           var image = links[i].querySelector('img[alt]');
                           if (image && image.getAttribute('alt')) raw = image.getAttribute('alt') + ' ' + raw;
                           var imageUrl = image ? (
@@ -237,7 +262,13 @@ class IwaraSearchWebView(
                           if (!name) {
                             var parent = links[i].closest('[class*="author"], [class*="user"], [class*="profile"], [class*="owner"], [class*="creator"]');
                             if (parent) {
-                              name = cleanAuthorName(parent.innerText || parent.textContent || '', username);
+                              var parentText = cleanText(parent.innerText || parent.textContent || '');
+                              if (parentText.length <= 80 &&
+                                  !parseDurationSeconds(parentText) &&
+                                  !/\b\d{4}-\d{2}-\d{2}\b/.test(parentText) &&
+                                  !/\b(views?|likes?|comments?|r-?18)\b/i.test(parentText)) {
+                                name = cleanAuthorName(parentText, username);
+                              }
                               if (!imageUrl) {
                                 var parentImage = parent.querySelector('img[src], img[data-src], img[srcset]');
                                 if (parentImage) {
@@ -280,13 +311,25 @@ class IwaraSearchWebView(
                           ]);
                           if (imageMeta) return absoluteUrl(imageMeta);
                         }
-                        var img = root.querySelector('img[src], img[data-src], img[srcset]');
-                        if (!img) return '';
-                        var value = img.currentSrc ||
-                          img.getAttribute('src') ||
-                          img.getAttribute('data-src') ||
-                          (img.getAttribute('srcset') || '').split(',')[0].trim().split(/\s+/)[0];
-                        return absoluteUrl(value);
+                        var images = Array.prototype.slice.call(root.querySelectorAll('img[src], img[data-src], img[srcset]'));
+                        for (var ii = 0; ii < images.length && ii < 12; ii++) {
+                          var img = images[ii];
+                          var value = img.currentSrc ||
+                            img.getAttribute('src') ||
+                            img.getAttribute('data-src') ||
+                            (img.getAttribute('srcset') || '').split(',')[0].trim().split(/\s+/)[0];
+                          var url = absoluteUrl(value);
+                          if (usableThumbnailUrl(url)) return url;
+                        }
+                        return '';
+                      }
+                      function usableThumbnailUrl(value) {
+                        var url = String(value || '');
+                        if (!url) return false;
+                        if (/\/(?:avatar|icon)\//i.test(url)) return false;
+                        if (/default-avatar/i.test(url)) return false;
+                        if (/\/delivery\/|lg\.php|bannerid=|zoneid=|campaignid=|\/ads?\//i.test(url)) return false;
+                        return true;
                       }
                       function readTags(root) {
                         root = root || document;
@@ -374,7 +417,7 @@ class IwaraSearchWebView(
                         ]);
                         var parsedMeta = parseDurationSeconds(metaDuration);
                         if (parsedMeta != null) return parsedMeta;
-                        var nodes = root.querySelectorAll('[class*="duration"], [data-testid*="duration"], time, span, div');
+                        var nodes = root.querySelectorAll('[class*="duration"], [data-testid*="duration"], [aria-label*="duration"], [itemprop="duration"], time[datetime^="PT"]');
                         for (var i = 0; i < Math.min(nodes.length, 80); i++) {
                           var parsed = parseDurationSeconds(nodes[i].getAttribute('datetime') || nodes[i].innerText || nodes[i].textContent || '');
                           if (parsed != null) return parsed;
@@ -389,16 +432,26 @@ class IwaraSearchWebView(
                         root = root || document;
                         var text = root.innerText || root.textContent || '';
                         var time = root.querySelector('time[datetime]');
-                        var createdAt = time ? cleanText(time.getAttribute('datetime') || time.innerText || '') : '';
+                        var createdAt = time ? cleanText(time.getAttribute('datetime') || time.innerText || '') : metaContent([
+                          'meta[property="article:published_time"]',
+                          'meta[property="video:release_date"]',
+                          'meta[itemprop="uploadDate"]'
+                        ]);
+                        var updatedAt = metaContent([
+                          'meta[property="article:modified_time"]',
+                          'meta[itemprop="dateModified"]'
+                        ]);
                         var rating = '';
+                        var ratingMeta = metaContent(['meta[name="rating"], meta[property="rating"], meta[itemprop="contentRating"]']);
                         var ratingMatch = text.match(/\b(general|ecchi|r-?18|restricted|safe)\b/i);
-                        if (ratingMatch) rating = ratingMatch[1];
+                        if (ratingMeta) rating = ratingMeta;
+                        if (!rating && ratingMatch) rating = ratingMatch[1];
                         return {
                           rating: rating,
                           visibility: visibilityFromText(text),
                           createdAt: createdAt,
-                          updatedAt: '',
-                          durationSeconds: durationFrom(root) || parseDurationSeconds(text),
+                          updatedAt: updatedAt,
+                          durationSeconds: durationFrom(root),
                           likeCount: parseNumber(text, 'likes?|赞'),
                           viewCount: parseNumber(text, 'views?|观看|播放'),
                           commentCount: parseNumber(text, 'comments?|评论')
@@ -406,12 +459,13 @@ class IwaraSearchWebView(
                       }
                       function metaFrom(root, allowDocumentFallback) {
                         root = root || document;
-                        var author = authorFrom(root);
-                        var stats = statsFrom(root);
+                        var contentRoot = root === document ? videoContentRoot() : root;
+                        var author = authorFrom(contentRoot);
+                        var stats = statsFrom(contentRoot);
                         var ogTitle = allowDocumentFallback ?
                           usefulTitle(metaContent(['meta[property="og:title"]', 'meta[name="twitter:title"]'])) :
                           '';
-                        var headingTitle = firstUseful(root, ['h1', 'h2', 'h3', '[data-testid*="title"]']);
+                        var headingTitle = firstUseful(contentRoot, ['h1', 'h2', 'h3', '[data-testid*="title"]']);
                         var documentTitle = allowDocumentFallback ?
                           usefulTitle(document.title.replace(/\s*\|\s*Iwara\s*$/i, '')) :
                           '';
@@ -426,7 +480,7 @@ class IwaraSearchWebView(
                           authorName: author.authorName || '',
                           authorUsername: author.authorUsername || '',
                           authorAvatarUrl: author.authorAvatarUrl || '',
-                          thumbnailUrl: thumbFrom(root, allowDocumentFallback),
+                          thumbnailUrl: thumbFrom(contentRoot, allowDocumentFallback),
                           rating: stats.rating || '',
                           visibility: stats.visibility || '',
                           createdAt: stats.createdAt || '',
@@ -435,7 +489,7 @@ class IwaraSearchWebView(
                           likeCount: stats.likeCount,
                           viewCount: stats.viewCount,
                           commentCount: stats.commentCount,
-                          tags: readTags(root)
+                          tags: readTags(contentRoot)
                         };
                       }
                       function currentVideoId() {
@@ -508,6 +562,36 @@ class IwaraSearchWebView(
                         var parsed = numberFromValue(value);
                         if (parsed == null) return null;
                         return parsed > 86400 ? Math.round(parsed / 1000) : Math.round(parsed);
+                      }
+                      function existingVideoDurationSeconds() {
+                        var videos = Array.prototype.slice.call(document.querySelectorAll('video'));
+                        for (var i = 0; i < videos.length; i++) {
+                          var duration = Number(videos[i].duration);
+                          if (isFinite(duration) && duration > 0) return Math.round(duration);
+                        }
+                        return null;
+                      }
+                      function durationNearCurrentTitle(pageTitle) {
+                        var target = cleanText((pageTitle || '').replace(/\s*\|\s*Iwara\s*$/i, ''));
+                        if (!target || !document.body) return null;
+                        var lines = (document.body.innerText || '').split(/\n+/)
+                          .map(function(line) { return cleanText(line); })
+                          .filter(function(line) { return !!line; });
+                        var best = -1;
+                        for (var i = 0; i < lines.length; i++) {
+                          if (lines[i] === target || lines[i].indexOf(target) >= 0) { best = i; break; }
+                        }
+                        if (best < 0) return null;
+                        for (var j = Math.max(0, best - 8); j < Math.min(lines.length, best + 16); j++) {
+                          var line = lines[j];
+                          if (/\bago\b/i.test(line) || /\d{4}-\d{2}-\d{2}/.test(line)) continue;
+                          var matches = line.match(/\b(?:\d{1,2}:)?\d{1,2}:\d{2}\b/g) || [];
+                          for (var m = 0; m < matches.length; m++) {
+                            var seconds = parseDurationSeconds(matches[m]);
+                            if (seconds != null && seconds > 0) return seconds;
+                          }
+                        }
+                        return null;
                       }
                       function countValue(obj, keys) {
                         var value = firstObjectValue(obj, keys);
@@ -604,6 +688,12 @@ class IwaraSearchWebView(
                           url.indexOf('/video/' + expectedId) >= 0;
                         if (!expectedMatch) return null;
                         var duration = durationValue(obj);
+                        if (duration == null &&
+                            expectedId &&
+                            id === expectedId &&
+                            window.__iwaraManagerMediaDurationSeconds) {
+                          duration = Math.round(window.__iwaraManagerMediaDurationSeconds);
+                        }
                         var tags = readStructuredTags(obj);
                         var author = readStructuredAuthor(obj);
                         var thumbnail = thumbnailUrlFromVideo(obj);
@@ -621,6 +711,7 @@ class IwaraSearchWebView(
                         return {
                           id: id,
                           url: url || ('https://www.iwara.tv/video/' + id),
+                          fileUrl: firstTextValue(obj, ['fileUrl', 'file_url']),
                           searchTitle: title,
                           title: title,
                           description: firstTextValue(obj, ['description', 'body']),
@@ -704,7 +795,9 @@ class IwaraSearchWebView(
                         var steps = 0;
                         while (node && node !== document.body && steps < 8) {
                           var text = cleanText(node.innerText || node.textContent || '');
-                          var hasVideoLink = !!(node.querySelector && node.querySelector('a[href*="/video/"]'));
+                          var videoLinkCount = node.querySelectorAll ? node.querySelectorAll('a[href*="/video/"]').length : 0;
+                          if (videoLinkCount > 3) break;
+                          var hasVideoLink = videoLinkCount > 0;
                           var hasImage = !!(node.querySelector && node.querySelector('img[src], img[data-src], img[srcset]'));
                           var hasDuration = parseDurationSeconds(text) != null;
                           var hasTitle = !!firstUseful(node, ['[data-testid*="title"], h1, h2, h3, h4, strong, .title, [class~="title"], [class$="-title"], [class*="video-title"], [class*="name"]']);
@@ -744,6 +837,82 @@ class IwaraSearchWebView(
                         }
                         return '';
                       }
+                      function titleFromHref(href, id) {
+                        try {
+                          var path = new URL(href, location.href).pathname;
+                          var marker = '/video/' + id + '/';
+                          var index = path.indexOf(marker);
+                          if (index < 0) return '';
+                          var slug = path.substring(index + marker.length).split('/')[0] || '';
+                          slug = decodeURIComponent(slug).replace(/[-_]+/g, ' ');
+                          return usefulTitle(slug);
+                        } catch (e) {
+                          return '';
+                        }
+                      }
+                      function authorTextsFrom(root) {
+                        root = root || document;
+                        var values = {};
+                        var links = Array.prototype.slice.call(root.querySelectorAll('a[href]'));
+                        for (var i = 0; i < links.length; i++) {
+                          var href = links[i].href || links[i].getAttribute('href') || '';
+                          var username = usernameFromHref(href);
+                          if (!username) continue;
+                          values[cleanText(username).toLowerCase()] = true;
+                          var raw = cleanText(links[i].innerText || links[i].textContent || links[i].getAttribute('title') || links[i].getAttribute('aria-label') || '');
+                          if (raw) values[raw.toLowerCase()] = true;
+                          var cleaned = cleanAuthorName(raw, username);
+                          if (cleaned) values[cleaned.toLowerCase()] = true;
+                        }
+                        return values;
+                      }
+                      function isAuthorOnlyTitle(value, root) {
+                        var text = cleanText(value).toLowerCase();
+                        if (!text) return true;
+                        var authors = authorTextsFrom(root);
+                        if (authors[text]) return true;
+                        var keys = Object.keys(authors);
+                        for (var i = 0; i < keys.length; i++) {
+                          if (keys[i] && keys[i].length >= 4 && (keys[i].indexOf(text) >= 0 || text.indexOf(keys[i]) >= 0)) {
+                            return true;
+                          }
+                        }
+                        return false;
+                      }
+                      function titleFromCardText(card, href, id) {
+                        if (!card) return '';
+                        var authors = authorTextsFrom(card);
+                        var raw = card.innerText || card.textContent || '';
+                        var lines = raw.split(/\n+/)
+                          .map(function(line) { return cleanText(line); })
+                          .filter(function(line) { return !!line; });
+                        for (var i = 0; i < lines.length; i++) {
+                          var line = usefulTitle(lines[i]);
+                          if (!line || isAuthorOnlyTitle(line, card)) continue;
+                          if (/^\d+([,.]\d+)?k?$/i.test(line)) continue;
+                          if (/^\d{4}-\d{2}-\d{2}$/.test(line)) continue;
+                          if (/^(r-?18|ecchi|general|restricted|safe)$/i.test(line)) continue;
+                          return line;
+                        }
+                        var text = cleanText(raw);
+                        if (!text) return '';
+                        text = text
+                          .replace(/^(\d+(?:[,.]\d+)?k?\s+){1,3}/i, '')
+                          .replace(/^\d{1,2}:\d{2}(?::\d{2})?\s+/i, '')
+                          .replace(/^(r-?18|ecchi|general|restricted|safe)\s+/i, '')
+                          .replace(/\s+\d{4}-\d{2}-\d{2}\s*$/i, '')
+                          .trim();
+                        Object.keys(authors)
+                          .sort(function(a, b) { return b.length - a.length; })
+                          .forEach(function(author) {
+                            if (!author) return;
+                            var escaped = author.replace(/[.*+?^${'$'}{}()|[\]\\]/g, '\\$&');
+                            text = text.replace(new RegExp('\\s+' + escaped + '\\s*$', 'i'), '').trim();
+                          });
+                        var title = usefulTitle(text);
+                        if (title && !isAuthorOnlyTitle(title, card)) return title;
+                        return titleFromHref(href, id);
+                      }
                       function collectResults() {
                         var seen = {};
                         var results = [];
@@ -758,7 +927,10 @@ class IwaraSearchWebView(
                           if (!id || seen[id]) continue;
                           var card = cardFromLink(link);
                           var meta = metaFrom(card || link, false);
-                          var candidateTitle = titleFromLink(link) || meta.title || '';
+                          var cardTitle = titleFromCardText(card || link, href, id);
+                          var linkTitle = titleFromLink(link);
+                          if (isAuthorOnlyTitle(linkTitle, card || link)) linkTitle = '';
+                          var candidateTitle = cardTitle || linkTitle || titleFromHref(href, id) || meta.title || '';
                           if (searchPage && !candidateTitle) continue;
                           seen[id] = true;
                           results.push({
@@ -786,6 +958,10 @@ class IwaraSearchWebView(
                         }
                         return results;
                       }
+                      var pageVideoDurationSeconds = existingVideoDurationSeconds();
+                      if (pageVideoDurationSeconds != null) window.__iwaraManagerPageVideoDurationSeconds = pageVideoDurationSeconds;
+                      var textDurationSeconds = durationNearCurrentTitle(document.title || '');
+                      if (textDurationSeconds != null) window.__iwaraManagerTextDurationSeconds = textDurationSeconds;
                       return JSON.stringify({
                         url: location.href,
                         title: document.title || '',
@@ -799,6 +975,18 @@ class IwaraSearchWebView(
                         apiProbePendingMillis: window.__iwaraManagerApiStartedAt ? Date.now() - window.__iwaraManagerApiStartedAt : 0,
                         apiProbeTimeoutMillis: window.__iwaraManagerApiTimeoutMillis || 0,
                         apiProbeDone: window.__iwaraManagerApiDone === true,
+                        apiAuthTokenPresent: window.__iwaraManagerAuthTokenPresent === true,
+                        apiAuthHeader: window.__iwaraManagerNativeAuthHeader || '',
+                        apiAuthStorageKeys: window.__iwaraManagerAuthStorageKeys || [],
+                        apiVideoHasDuration: window.__iwaraManagerApiVideoHasDuration === true,
+                        apiVideoNeedsMediaDuration: window.__iwaraManagerApiVideoNeedsMediaDuration === true,
+                        pageVideoDurationSeconds: window.__iwaraManagerPageVideoDurationSeconds || pageVideoDurationSeconds || null,
+                        textDurationSeconds: window.__iwaraManagerTextDurationSeconds || textDurationSeconds || null,
+                        mediaDurationProbeStarted: window.__iwaraManagerMediaDurationStarted === true,
+                        mediaDurationProbeDone: window.__iwaraManagerMediaDurationDone === true,
+                        mediaDurationProbePendingMillis: window.__iwaraManagerMediaDurationStartedAt ? Date.now() - window.__iwaraManagerMediaDurationStartedAt : 0,
+                        mediaDurationSeconds: window.__iwaraManagerMediaDurationSeconds || null,
+                        mediaDurationProbeError: window.__iwaraManagerMediaDurationError || '',
                         apiProbeErrors: window.__iwaraManagerApiErrors || [],
                         apiProbeSummaries: window.__iwaraManagerApiSummaries || []
                       });
@@ -835,7 +1023,7 @@ class IwaraSearchWebView(
                     val pageResults = if (isSearch) {
                         mergeResultObjects(
                             primary = readResultObjects(payload.optJSONArray("results")),
-                            supplemental = structuredResults
+                            supplemental = structuredResults.filter { isReliableSearchStructuredResult(it) }
                         )
                     } else {
                         emptyList()
@@ -844,22 +1032,17 @@ class IwaraSearchWebView(
                     val currentStructuredResult = currentPageId?.let { expectedId ->
                         structuredResults.firstOrNull { it.optString("id") == expectedId }
                     }
-                    val fallbackIds = if (
-                        pageResults.isEmpty() &&
-                        currentStructuredResult == null &&
-                        currentPageId != null &&
-                        allowPageFallback &&
+                    val idPageLoaded = currentPageId != null &&
                         !timedOut &&
                         !emptyDocument &&
                         !loading &&
                         !pageError &&
                         !cloudflare &&
-                        (bodyText.length > 80 || html.length > 3000)
-                    ) {
-                        listOf(currentPageId)
-                    } else {
-                        emptyList()
-                    }
+                        (
+                            cleanedPageTitle(title).isNotBlank() ||
+                                bodyText.length > 80 ||
+                                html.length > 3000
+                            )
                     val hasStructuredVideo = pageResults.isNotEmpty() || currentStructuredResult != null
                     val apiProbeErrors = payload.optJSONArray("apiProbeErrors") ?: JSONArray()
                     val apiAllNotFound = apiProbeErrors.length() > 0 &&
@@ -878,19 +1061,17 @@ class IwaraSearchWebView(
                         pageResults
                     } else if (currentStructuredResult != null) {
                         listOf(currentStructuredResult)
-                    } else {
-                        fallbackIds.map { id ->
-                            val pageMeta = payload.optJSONObject("pageMeta") ?: JSONObject()
+                    } else if (currentPageId != null && idPageLoaded) {
+                        val pageMeta = payload.optJSONObject("pageMeta") ?: JSONObject()
+                        val pageTitle = pageMeta.optString("title")
+                            .ifBlank { cleanedPageTitle(title) }
+                            .ifBlank { query }
+                        listOf(
                             JSONObject()
-                                .put("id", id)
-                                .put("url", "https://www.iwara.tv/video/$id")
-                                .put(
-                                    "searchTitle",
-                                    pageMeta.optString("title").ifBlank {
-                                        cleanedPageTitle(title).ifBlank { query }
-                                    }
-                                )
-                                .put("title", pageMeta.optString("title"))
+                                .put("id", currentPageId)
+                                .put("url", "https://www.iwara.tv/video/$currentPageId")
+                                .put("searchTitle", pageTitle)
+                                .put("title", pageTitle)
                                 .put("description", pageMeta.optString("description"))
                                 .put("authorId", pageMeta.optString("authorId"))
                                 .put("authorName", pageMeta.optString("authorName"))
@@ -901,12 +1082,14 @@ class IwaraSearchWebView(
                                 .put("visibility", pageMeta.optString("visibility"))
                                 .put("createdAt", pageMeta.optString("createdAt"))
                                 .put("updatedAt", pageMeta.optString("updatedAt"))
-                                .put("durationSeconds", pageMeta.opt("durationSeconds"))
-                                .put("likeCount", pageMeta.opt("likeCount"))
-                                .put("viewCount", pageMeta.opt("viewCount"))
-                                .put("commentCount", pageMeta.opt("commentCount"))
+                                .put("durationSeconds", pageMeta.opt("durationSeconds") ?: JSONObject.NULL)
+                                .put("likeCount", pageMeta.opt("likeCount") ?: JSONObject.NULL)
+                                .put("viewCount", pageMeta.opt("viewCount") ?: JSONObject.NULL)
+                                .put("commentCount", pageMeta.opt("commentCount") ?: JSONObject.NULL)
                                 .put("tags", pageMeta.optJSONArray("tags") ?: JSONArray())
-                        }
+                        )
+                    } else {
+                        emptyList<JSONObject>()
                     }
                     val ids = resultObjects.mapNotNull { it.optString("id").takeIf { id -> id.isNotBlank() } }
 
@@ -929,6 +1112,7 @@ class IwaraSearchWebView(
                         .put("pageTitle", title)
                         .put("bodyTextLength", bodyText.length)
                         .put("htmlLength", html.length)
+                        .put("pageMeta", payload.optJSONObject("pageMeta") ?: JSONObject())
                         .put("attempts", attempts)
                         .put("pageStarted", pageStarted)
                         .put("pageFinished", pageFinished)
@@ -936,18 +1120,35 @@ class IwaraSearchWebView(
                         .put("timeoutMillis", timeoutMillis)
                         .put("apiEndpointTemplates", JSONArray(effectiveApiEndpointTemplates))
                         .put("apiRequestHeaderNames", JSONArray(options.apiRequestHeaders.keys))
+                        .put("loginStatus", options.loginStatus)
+                        .put("loginMessage", options.loginMessage ?: JSONObject.NULL)
+                        .put("loginCookiePresent", loginCookieSnapshot.first || options.loginCookiePresent)
+                        .put("loginCookieNames", JSONArray((loginCookieSnapshot.second + options.loginCookieNames).distinct()))
                         .put("allowPageFallback", allowPageFallback)
                         .put("lastError", lastError)
                         .put("cloudflare", cloudflare)
                         .put("noResults", noResults)
                         .put("pageError", pageError)
                         .put("loading", loading)
+                        .put("idPageLoaded", idPageLoaded)
                         .put("structuredResultCount", structuredResults.size)
                         .put("apiProbeStarted", payload.optBoolean("apiProbeStarted"))
                         .put("apiProbeStartedAt", payload.optLong("apiProbeStartedAt"))
                         .put("apiProbePendingMillis", payload.optLong("apiProbePendingMillis"))
                         .put("apiProbeTimeoutMillis", payload.optLong("apiProbeTimeoutMillis"))
                         .put("apiProbeDone", payload.optBoolean("apiProbeDone"))
+                        .put("apiAuthTokenPresent", payload.optBoolean("apiAuthTokenPresent"))
+                        .put("apiAuthHeader", payload.optString("apiAuthHeader"))
+                        .put("apiAuthStorageKeys", payload.optJSONArray("apiAuthStorageKeys") ?: JSONArray())
+                        .put("apiVideoHasDuration", payload.optBoolean("apiVideoHasDuration"))
+                        .put("apiVideoNeedsMediaDuration", payload.optBoolean("apiVideoNeedsMediaDuration"))
+                        .put("pageVideoDurationSeconds", payload.opt("pageVideoDurationSeconds") ?: JSONObject.NULL)
+                        .put("textDurationSeconds", payload.opt("textDurationSeconds") ?: JSONObject.NULL)
+                        .put("mediaDurationProbeStarted", payload.optBoolean("mediaDurationProbeStarted"))
+                        .put("mediaDurationProbeDone", payload.optBoolean("mediaDurationProbeDone"))
+                        .put("mediaDurationProbePendingMillis", payload.optLong("mediaDurationProbePendingMillis"))
+                        .put("mediaDurationSeconds", payload.opt("mediaDurationSeconds") ?: JSONObject.NULL)
+                        .put("mediaDurationProbeError", payload.optString("mediaDurationProbeError"))
                         .put("apiProbeErrors", apiProbeErrors)
                         .put("apiProbeSummaries", payload.optJSONArray("apiProbeSummaries") ?: JSONArray())
                         .put("candidateIds", JSONArray(ids))
@@ -964,12 +1165,21 @@ class IwaraSearchWebView(
                                 append("；HTML长度：${html.length}")
                                 if (cloudflare) append("；Cloudflare:true")
                                 if (pageError) append("；错误页:true")
+                                if (idPageLoaded) append("；ID页已加载:true")
+                                if (options.loginStatus != "LoggedIn" && (pageError || apiProbeErrors.length() > 0)) append("；可能需要登录后访问")
                                 if (loading) append("；Loading:true")
                                 append("；结构化结果:${structuredResults.size}")
                                 if (payload.optBoolean("apiProbeStarted")) {
                                     val apiProbeState = if (payload.optBoolean("apiProbeDone")) "完成" else "等待中"
                                     append("；API探测:$apiProbeState")
                                     append("；API等待:${payload.optLong("apiProbePendingMillis")}ms")
+                                    append("；API授权Token:${payload.optBoolean("apiAuthTokenPresent")}")
+                                    if (payload.optBoolean("mediaDurationProbeStarted")) {
+                                        append("；媒体时长探测:${if (payload.optBoolean("mediaDurationProbeDone")) "完成" else "等待中"}")
+                                        payload.optLong("mediaDurationSeconds").takeIf { it > 0L }?.let { seconds ->
+                                            append("(${seconds}s)")
+                                        }
+                                    }
                                     if (apiProbeErrors.length() > 0) {
                                         append("；API错误:${apiProbeErrors.length()}个")
                                     }
@@ -977,6 +1187,7 @@ class IwaraSearchWebView(
                             }
                         )
 
+                    CookieManager.getInstance().flush()
                     webView.destroy()
                     continuation.resume(result.toString(2))
                 }
@@ -1002,6 +1213,43 @@ class IwaraSearchWebView(
                           var notFound = /404|not found|video not found/i.test(text + ' ' + title);
                           var pageError = /error\s*\|\s*iwara/i.test(title) || /^error\b/i.test(title) || notFound;
                           var noResults = /no results|0 results|no videos found|nothing found/i.test(text);
+                          function durationTextToSeconds(value) {
+                            var textValue = String(value || '').trim();
+                            var match = textValue.match(/\b(?:\d{1,2}:)?\d{1,2}:\d{2}\b/);
+                            if (!match) return null;
+                            var parts = match[0].split(':').map(function(part) { return Number(part); });
+                            if (parts.some(function(part) { return !isFinite(part); })) return null;
+                            if (parts.length === 2) return parts[0] * 60 + parts[1];
+                            if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+                            return null;
+                          }
+                          function existingVideoDurationSeconds() {
+                            var videos = Array.prototype.slice.call(document.querySelectorAll('video'));
+                            for (var vi = 0; vi < videos.length; vi++) {
+                              var duration = Number(videos[vi].duration);
+                              if (isFinite(duration) && duration > 0) return Math.round(duration);
+                            }
+                            return null;
+                          }
+                          function durationNearCurrentTitle(pageTitle) {
+                            var target = (pageTitle || '').replace(/\s*\|\s*Iwara\s*$/i, '').replace(/\s+/g, ' ').trim();
+                            if (!target || !document.body) return null;
+                            var lines = (document.body.innerText || '').split(/\n+/)
+                              .map(function(line) { return String(line || '').replace(/\s+/g, ' ').trim(); })
+                              .filter(function(line) { return !!line; });
+                            var best = -1;
+                            for (var li = 0; li < lines.length; li++) {
+                              if (lines[li] === target || lines[li].indexOf(target) >= 0) { best = li; break; }
+                            }
+                            if (best < 0) return null;
+                            for (var di = Math.max(0, best - 8); di < Math.min(lines.length, best + 16); di++) {
+                              var line = lines[di];
+                              if (/\bago\b/i.test(line) || /\d{4}-\d{2}-\d{2}/.test(line)) continue;
+                              var seconds = durationTextToSeconds(line);
+                              if (seconds != null && seconds > 0) return seconds;
+                            }
+                            return null;
+                          }
                           function currentVideoId() {
                             var match = (location.pathname || '').match(/\/video\/([^/?#]+)/i);
                             return match ? decodeURIComponent(match[1]) : '';
@@ -1017,8 +1265,12 @@ class IwaraSearchWebView(
                             window.__iwaraManagerApiStartedAt = Date.now();
                             window.__iwaraManagerApiTimeoutMillis = $apiProbeTimeoutMillis;
                             window.__iwaraManagerApiResults = [];
+                            window.__iwaraManagerApiResultIds = {};
                             window.__iwaraManagerApiErrors = [];
                             window.__iwaraManagerApiSummaries = [];
+                            window.__iwaraManagerApiVideoHasDuration = false;
+                            window.__iwaraManagerApiVideoNeedsMediaDuration = false;
+                            window.__iwaraManagerNativeAuthHeader = '';
                             var encoded = encodeURIComponent(id);
                             var urls = endpointTemplates.map(function(template) {
                               return String(template)
@@ -1028,6 +1280,65 @@ class IwaraSearchWebView(
                               return value && array.indexOf(value) === index;
                             });
                             if (!urls.length) return;
+                            function tokenFromValue(value, depth) {
+                              if (value == null || depth > 4) return '';
+                              if (typeof value === 'string') {
+                                var text = value.trim().replace(/^"|"$/g, '');
+                                var bearer = text.match(/Bearer\s+([A-Za-z0-9_\-.]+\.[A-Za-z0-9_\-.]+(?:\.[A-Za-z0-9_\-.]+)?)/i);
+                                if (bearer) return bearer[0];
+                                if (/^[A-Za-z0-9_\-.]+\.[A-Za-z0-9_\-.]+(?:\.[A-Za-z0-9_\-.]+)?$/.test(text)) return text;
+                                if ((text.charAt(0) === '{' || text.charAt(0) === '[') && text.length < 20000) {
+                                  try { return tokenFromValue(JSON.parse(text), depth + 1); } catch (e) {}
+                                }
+                                return '';
+                              }
+                              if (Array.isArray(value)) {
+                                for (var ai = 0; ai < value.length && ai < 40; ai++) {
+                                  var arrayToken = tokenFromValue(value[ai], depth + 1);
+                                  if (arrayToken) return arrayToken;
+                                }
+                                return '';
+                              }
+                              if (typeof value === 'object') {
+                                var keys = Object.keys(value);
+                                var priority = keys.filter(function(key) {
+                                  return /(authorization|access.*token|token|jwt|session)/i.test(key);
+                                }).concat(keys.filter(function(key) {
+                                  return !/(authorization|access.*token|token|jwt|session)/i.test(key);
+                                }));
+                                for (var oi = 0; oi < priority.length && oi < 80; oi++) {
+                                  var objectToken = tokenFromValue(value[priority[oi]], depth + 1);
+                                  if (objectToken) return objectToken;
+                                }
+                              }
+                              return '';
+                            }
+                            function discoverAuthToken() {
+                              var foundKeys = [];
+                              var stores = [];
+                              try { stores.push({ name: 'localStorage', store: localStorage }); } catch (e) {}
+                              try { stores.push({ name: 'sessionStorage', store: sessionStorage }); } catch (e) {}
+                              for (var si = 0; si < stores.length; si++) {
+                                var area = stores[si];
+                                for (var ki = 0; ki < area.store.length && ki < 120; ki++) {
+                                  var key = area.store.key(ki);
+                                  if (!key) continue;
+                                  var value = '';
+                                  try { value = area.store.getItem(key); } catch (e) { value = ''; }
+                                  var keyLooksAuth = /(auth|token|jwt|session|user|account)/i.test(key);
+                                  var token = tokenFromValue(value, 0);
+                                  if (token || keyLooksAuth) foundKeys.push(area.name + ':' + key);
+                                  if (token) {
+                                    window.__iwaraManagerAuthStorageKeys = foundKeys.slice(0, 24);
+                                    window.__iwaraManagerAuthTokenPresent = true;
+                                    return token;
+                                  }
+                                }
+                              }
+                              window.__iwaraManagerAuthStorageKeys = foundKeys.slice(0, 24);
+                              window.__iwaraManagerAuthTokenPresent = false;
+                              return '';
+                            }
                             function buildRequestHeaders() {
                               var headers = {};
                               var forbidden = /^(accept-charset|accept-encoding|access-control-request-headers|access-control-request-method|connection|content-length|cookie|date|dnt|expect|host|keep-alive|origin|permissions-policy|referer|set-cookie|te|trailer|transfer-encoding|upgrade|via)$/i;
@@ -1039,6 +1350,13 @@ class IwaraSearchWebView(
                               if (!headers.accept && !headers.Accept) {
                                 headers.accept = 'application/json, text/plain, */*';
                               }
+                              if (!headers.authorization && !headers.Authorization) {
+                                var authToken = discoverAuthToken();
+                                if (authToken) {
+                                  headers.authorization = /^Bearer\s+/i.test(authToken) ? authToken : ('Bearer ' + authToken);
+                                }
+                              }
+                              window.__iwaraManagerNativeAuthHeader = headers.authorization || headers.Authorization || '';
                               return headers;
                             }
                             function summarize(apiUrl, parsed) {
@@ -1049,12 +1367,95 @@ class IwaraSearchWebView(
                               var user = data.user && typeof data.user === 'object' ? data.user : {};
                               return {
                                 url: apiUrl,
+                                videoId: data.id || data.slugId || data.videoId || '',
+                                title: data.title || '',
+                                rating: data.rating || data.contentRating || '',
+                                visibility: data.private === true ? 'private' :
+                                  (data.unlisted === true ? 'unlisted' :
+                                    (data.private === false ? 'public' : (data.visibility || data.privacy || ''))),
+                                createdAt: data.createdAt || data.created_at || data.publishedAt || data.published_at || '',
+                                updatedAt: data.updatedAt || data.updated_at || '',
+                                fileDuration: file && file.duration != null ? file.duration : null,
+                                fileUrlPresent: !!(data.fileUrl || data.file_url),
+                                userId: user.id || '',
+                                userName: user.name || user.displayName || user.display_name || '',
+                                userUsername: user.username || '',
+                                tagCount: Array.isArray(data.tags) ? data.tags.length : 0,
                                 rootKeys: Object.keys(root).slice(0, 80),
                                 dataKeys: Object.keys(data).slice(0, 80),
                                 fileKeys: Object.keys(file || {}).slice(0, 80),
-                                userKeys: Object.keys(user || {}).slice(0, 80),
-                                dataPreview: JSON.stringify(data).slice(0, 3000)
+                                userKeys: Object.keys(user || {}).slice(0, 80)
                               };
+                            }
+                            function apiDurationValue(parsed) {
+                              var root = parsed && typeof parsed === 'object' ? parsed : {};
+                              var data = root.data && typeof root.data === 'object' ? root.data : root;
+                              var file = data.file && typeof data.file === 'object' ? data.file :
+                                (Array.isArray(data.files) && data.files.length ? data.files[0] : {});
+                              var value = file && file.duration != null ? file.duration : data.duration;
+                              if (value == null || value === '') return null;
+                              var number = Number(value);
+                              if (!isFinite(number) || number <= 0) return null;
+                              return number > 86400 ? Math.round(number / 1000) : Math.round(number);
+                            }
+                            function maybeStartMediaDurationProbe(apiUrl, parsed) {
+                              if (window.__iwaraManagerMediaDurationStarted === true) return;
+                              if (apiDurationValue(parsed) != null) return;
+                              var root = parsed && typeof parsed === 'object' ? parsed : {};
+                              var data = root.data && typeof root.data === 'object' ? root.data : root;
+                              var fileUrl = data.fileUrl || data.file_url || '';
+                              if (!fileUrl) return;
+                              window.__iwaraManagerMediaDurationStarted = true;
+                              window.__iwaraManagerMediaDurationDone = false;
+                              window.__iwaraManagerMediaDurationStartedAt = Date.now();
+                              window.__iwaraManagerMediaDurationSeconds = null;
+                              window.__iwaraManagerMediaDurationError = '';
+                              var timeoutMillis = Math.max(5000, window.__iwaraManagerApiTimeoutMillis || 30000);
+                              var video = document.createElement('video');
+                              video.preload = 'metadata';
+                              video.muted = true;
+                              video.playsInline = true;
+                              video.style.position = 'fixed';
+                              video.style.left = '-9999px';
+                              video.style.width = '1px';
+                              video.style.height = '1px';
+                              function cleanup() {
+                                try { video.removeAttribute('src'); video.load(); } catch (e) {}
+                                try { if (video.parentElement) video.parentElement.removeChild(video); } catch (e) {}
+                              }
+                              var timer = setTimeout(function() {
+                                if (window.__iwaraManagerMediaDurationDone === true) return;
+                                window.__iwaraManagerMediaDurationError = 'metadata timeout after ' + timeoutMillis + 'ms';
+                                window.__iwaraManagerMediaDurationDone = true;
+                                cleanup();
+                              }, timeoutMillis);
+                              video.onloadedmetadata = function() {
+                                var duration = Number(video.duration);
+                                if (isFinite(duration) && duration > 0) {
+                                  window.__iwaraManagerMediaDurationSeconds = Math.round(duration);
+                                } else {
+                                  window.__iwaraManagerMediaDurationError = 'metadata duration unavailable';
+                                }
+                                clearTimeout(timer);
+                                window.__iwaraManagerMediaDurationDone = true;
+                                cleanup();
+                              };
+                              video.onerror = function() {
+                                window.__iwaraManagerMediaDurationError = 'metadata load failed';
+                                clearTimeout(timer);
+                                window.__iwaraManagerMediaDurationDone = true;
+                                cleanup();
+                              };
+                              try {
+                                document.body.appendChild(video);
+                                video.src = fileUrl;
+                                video.load();
+                              } catch (e) {
+                                window.__iwaraManagerMediaDurationError = String(e && e.message || e || 'metadata probe failed');
+                                clearTimeout(timer);
+                                window.__iwaraManagerMediaDurationDone = true;
+                                cleanup();
+                              }
                             }
                             function markDone() {
                               if (window.__iwaraManagerApiDone === true) return;
@@ -1091,8 +1492,20 @@ class IwaraSearchWebView(
                                   try {
                                     var parsed = JSON.parse(body);
                                     if (parsed && typeof parsed === 'object') {
-                                      window.__iwaraManagerApiResults.push(parsed);
-                                      window.__iwaraManagerApiSummaries.push(summarize(apiUrl, parsed));
+                                      var summary = summarize(apiUrl, parsed);
+                                      var apiDuration = apiDurationValue(parsed);
+                                      if (apiDuration != null) {
+                                        window.__iwaraManagerApiVideoHasDuration = true;
+                                      } else if (summary.fileUrlPresent) {
+                                        window.__iwaraManagerApiVideoNeedsMediaDuration = true;
+                                      }
+                                      var resultId = summary.videoId || apiUrl;
+                                      if (!window.__iwaraManagerApiResultIds[resultId]) {
+                                        window.__iwaraManagerApiResultIds[resultId] = true;
+                                        window.__iwaraManagerApiResults.push(parsed);
+                                        window.__iwaraManagerApiSummaries.push(summary);
+                                      }
+                                      maybeStartMediaDurationProbe(apiUrl, parsed);
                                     }
                                   } catch (e) {
                                     window.__iwaraManagerApiErrors.push(apiUrl + ' JSON parse failed');
@@ -1107,24 +1520,54 @@ class IwaraSearchWebView(
                             });
                           }
                           startApiProbe();
+                          var currentId = currentVideoId();
                           var linkFound = /\/video\/([A-Za-z0-9_-]{8,})/.test(html);
                           var pathHasId = /\/video\/[A-Za-z0-9_-]{8,}/.test(location.pathname);
                           var pathFound = pathHasId && !cloudflare && (text.length > 80 || html.length > 3000);
                           var titleReady = !/^(search|loading|iwara|error|404|not found)$/i.test((title || '').replace(/\s*\|\s*Iwara\s*$/i, '').trim()) ||
                               !!document.querySelector('h1, h2, [data-testid*="title"], meta[property="og:title"]');
+                          var pageDurationSeconds = existingVideoDurationSeconds() || durationNearCurrentTitle(title);
+                          if (pageDurationSeconds != null) {
+                            window.__iwaraManagerPageVideoDurationSeconds = pageDurationSeconds;
+                          }
                           var apiDone = window.__iwaraManagerApiDone === true;
                           var apiStarted = window.__iwaraManagerApiStarted === true;
                           var apiHasVideo = Array.isArray(window.__iwaraManagerApiResults) && window.__iwaraManagerApiResults.length > 0;
+                          var apiHasDuration = window.__iwaraManagerApiVideoHasDuration === true;
+                          var apiNeedsMediaDuration = window.__iwaraManagerApiVideoNeedsMediaDuration === true;
+                          var apiPendingMillis = window.__iwaraManagerApiStartedAt ? Date.now() - window.__iwaraManagerApiStartedAt : 0;
+                          var apiProbeTimeout = window.__iwaraManagerApiTimeoutMillis || 0;
+                          var apiSettled = !apiStarted || apiDone ||
+                              (apiProbeTimeout > 0 && apiPendingMillis >= apiProbeTimeout);
+                          var mediaDurationStarted = window.__iwaraManagerMediaDurationStarted === true;
+                          var mediaDurationDone = window.__iwaraManagerMediaDurationDone === true;
+                          var mediaDurationPendingMillis = window.__iwaraManagerMediaDurationStartedAt ? Date.now() - window.__iwaraManagerMediaDurationStartedAt : 0;
+                          var mediaDurationAvailable = Number(window.__iwaraManagerMediaDurationSeconds || 0) > 0;
+                          var pageDurationAvailable = pageDurationSeconds != null || window.__iwaraManagerPageVideoDurationSeconds > 0;
+                          var mediaDurationSettled = !apiNeedsMediaDuration || mediaDurationAvailable || pageDurationAvailable ||
+                              (apiProbeTimeout > 0 && mediaDurationPendingMillis >= apiProbeTimeout);
                           var metadataReady = /"(durationSeconds|duration_seconds|duration|rating|visibility|createdAt|created_at|publishedAt|published_at|tags|likeCount|viewCount|commentCount)"\s*:/i.test(html) ||
                               /\b(tags?|views?|likes?|comments?|r-?18|ecchi|general|public|private|unlisted)\b/i.test(text);
-                          var searchReady = linkFound && !loading && !pageError && !cloudflare;
+                          var searchReady = linkFound && !loading && !pageError && !cloudflare && enoughSearchWait;
                           var enoughDomWait = ${attempts} >= 4;
+                          var enoughSearchWait = ${attempts} >= 8;
+                          var pageHasStructuredDataHint = pathHasId && currentId &&
+                              html.indexOf(currentId) >= 0 &&
+                              (html.length > 100000 || metadataReady || /__NUXT__|__NUXT_DATA__|__INITIAL_STATE__|__PINIA__|__pinia/i.test(html));
+                          var detailPageReady = pathFound && !pageError && !cloudflare && titleReady &&
+                              (metadataReady || pageHasStructuredDataHint) && enoughDomWait;
+                          var searchPageReady = searchPage && !loading && !pageError && !cloudflare && enoughSearchWait && linkFound;
                           var allowPageFallback = ${if (allowPageFallback) "true" else "false"};
                           var domFallbackReady = allowPageFallback && !loading && !pageError && titleReady && metadataReady &&
                               (apiDone || !apiStarted) && enoughDomWait;
                           var apiFallbackReady = allowPageFallback && !loading && !pageError && titleReady && apiDone && metadataReady;
-                          var detailReady = pathFound && (apiHasVideo || apiFallbackReady || domFallbackReady);
-                          var found = searchPage ? searchReady : detailReady;
+                          var detailReady = pathFound && (
+                              (apiHasVideo && (apiHasDuration || pageDurationAvailable || mediaDurationSettled)) ||
+                              (apiFallbackReady && mediaDurationSettled) ||
+                              domFallbackReady ||
+                              ((detailPageReady || pageHasStructuredDataHint) && apiSettled && mediaDurationSettled)
+                            );
+                          var found = searchPage ? (searchReady || searchPageReady) : detailReady;
                           return JSON.stringify({
                             found: found,
                             noResults: noResults,
@@ -1133,7 +1576,14 @@ class IwaraSearchWebView(
                             loading: loading,
                             apiStarted: apiStarted,
                             apiDone: apiDone,
-                            apiHasVideo: apiHasVideo
+                            apiHasVideo: apiHasVideo,
+                            apiPendingMillis: apiPendingMillis,
+                            apiSettled: apiSettled,
+                            mediaDurationStarted: mediaDurationStarted,
+                            mediaDurationDone: mediaDurationDone,
+                            mediaDurationPendingMillis: mediaDurationPendingMillis,
+                            pageHasStructuredDataHint: pageHasStructuredDataHint,
+                            searchPageReady: searchPageReady
                           });
                         })();
                         """.trimIndent()
@@ -1166,8 +1616,7 @@ class IwaraSearchWebView(
                     "Mozilla/5.0 (Linux; Android 16) AppleWebKit/537.36 " +
                         "Chrome/125.0.0.0 Mobile Safari/537.36"
             }
-            CookieManager.getInstance().setAcceptCookie(true)
-            CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
+            sessionManager.initializeCookies(webView)
             webView.webChromeClient = WebChromeClient()
             webView.webViewClient = object : WebViewClient() {
                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
@@ -1223,6 +1672,7 @@ class IwaraSearchWebView(
                     "url",
                     obj.optString("url").ifBlank { "https://www.iwara.tv/video/$id" }
                 )
+                .put("fileUrl", obj.optString("fileUrl").trim())
                 .put("searchTitle", obj.optString("searchTitle").trim())
                 .put("title", obj.optString("title").trim())
                 .put("description", obj.optString("description").trim())
@@ -1242,6 +1692,22 @@ class IwaraSearchWebView(
                 .put("tags", obj.optJSONArray("tags") ?: JSONArray())
         }
         return result
+    }
+
+    private fun isReliableSearchStructuredResult(obj: JSONObject): Boolean {
+        val id = obj.optString("id").trim()
+        if (!Regex("""^[A-Za-z0-9_-]{8,}$""").matches(id)) return false
+        val url = obj.optString("url").trim()
+        if (url.isNotBlank() && !url.contains("/video/$id", ignoreCase = true)) return false
+        val title = obj.optString("searchTitle")
+            .ifBlank { obj.optString("title") }
+            .trim()
+        if (cleanedPageTitle(title).isBlank()) return false
+        return obj.optString("thumbnailUrl").isNotBlank() ||
+            obj.optString("authorName").isNotBlank() ||
+            obj.optString("authorUsername").isNotBlank() ||
+            obj.optJSONArray("tags")?.let { it.length() > 0 } == true ||
+            obj.opt("durationSeconds")?.let { it != JSONObject.NULL } == true
     }
 
     private fun mergeResultObjects(

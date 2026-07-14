@@ -12,6 +12,7 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLHandshakeException
@@ -19,6 +20,20 @@ import javax.net.ssl.X509TrustManager
 import javax.xml.parsers.DocumentBuilderFactory
 
 class WebDavClient {
+    private val clientCache = ConcurrentHashMap<ClientKey, OkHttpClient>()
+
+    // 缓存的 XML 解析工厂：禁用 DOCTYPE/外部实体（防 XXE），并避免每次 PROPFIND 重新做服务发现。
+    private val documentBuilderFactory: DocumentBuilderFactory by lazy {
+        DocumentBuilderFactory.newInstance().apply {
+            isNamespaceAware = true
+            runCatching { setFeature("http://apache.org/xml/features/disallow-doctype-decl", true) }
+            runCatching { setFeature("http://xml.org/sax/features/external-general-entities", false) }
+            runCatching { setFeature("http://xml.org/sax/features/external-parameter-entities", false) }
+            runCatching { isXIncludeAware = false }
+            runCatching { isExpandEntityReferences = false }
+        }
+    }
+
     fun authHeaders(source: LibrarySource, password: String?): Map<String, String> {
         val username = source.webDavUsername?.trim().orEmpty()
         if (password.isNullOrBlank()) return emptyMap()
@@ -127,6 +142,14 @@ class WebDavClient {
     }
 
     private fun buildClient(source: LibrarySource): OkHttpClient {
+        // 按超时与 TLS 配置缓存并复用 OkHttpClient，避免扫描大量目录时为每次 PROPFIND 新建客户端，
+        // 从而复用连接池与线程池，显著降低扫描开销。
+        val key = ClientKey(
+            connectTimeoutSeconds = source.connectTimeoutSeconds,
+            readTimeoutSeconds = source.readTimeoutSeconds,
+            allowInsecureTls = source.webDavAllowInsecureTls
+        )
+        clientCache[key]?.let { return it }
         val builder = OkHttpClient.Builder()
             .connectTimeout(source.connectTimeoutSeconds.toLong(), TimeUnit.SECONDS)
             .readTimeout(source.readTimeoutSeconds.toLong(), TimeUnit.SECONDS)
@@ -142,12 +165,17 @@ class WebDavClient {
             builder.sslSocketFactory(sslContext.socketFactory, trustManager)
             builder.hostnameVerifier { _, _ -> true }
         }
-        return builder.build()
+        return builder.build().also { clientCache[key] = it }
     }
 
+    private data class ClientKey(
+        val connectTimeoutSeconds: Int,
+        val readTimeoutSeconds: Int,
+        val allowInsecureTls: Boolean
+    )
+
     private fun parseMultistatus(bytes: ByteArray, requestUrl: String): List<WebDavEntry> {
-        val factory = DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }
-        val document = factory.newDocumentBuilder().parse(ByteArrayInputStream(bytes))
+        val document = documentBuilderFactory.newDocumentBuilder().parse(ByteArrayInputStream(bytes))
         val requestPath = URI(requestUrl).path.trimEnd('/')
         val responses = document.getElementsByTagNameNS("*", "response")
         val result = mutableListOf<WebDavEntry>()

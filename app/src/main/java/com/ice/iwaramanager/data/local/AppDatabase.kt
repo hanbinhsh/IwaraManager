@@ -28,7 +28,7 @@ import com.ice.iwaramanager.data.local.entity.VideoTagEntity
         LibrarySourceEntity::class,
         LibraryFolderEntity::class
     ],
-    version = 6,
+    version = 8,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -48,7 +48,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "iwara_manager.db"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
                     .build()
                     .also { INSTANCE = it }
             }
@@ -140,6 +140,19 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("UPDATE video SET lastSeenAt = updatedAt WHERE lastSeenAt IS NULL")
                 db.execSQL("ALTER TABLE library_source ADD COLUMN lastCompletedScanAt INTEGER")
                 db.execSQL("UPDATE library_source SET lastCompletedScanAt = updatedAt WHERE lastCompletedScanAt IS NULL")
+            }
+        }
+
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 支持列表/搜索/筛选的 ORDER BY updatedAt DESC（按 sourceId 过滤），避免大库全表排序。
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_video_sourceId_updatedAt ON video(sourceId, updatedAt)")
+            }
+        }
+
+        private val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_video_displayName_fileSize ON video(displayName, fileSize)")
             }
         }
     }

@@ -42,7 +42,11 @@ data class IwaraMatchNetworkOptions(
     val apiProbeTimeoutMillis: Long = 30_000L,
     val allowPageFallback: Boolean = false,
     val fetchSearchResultDetailsWithApi: Boolean = true,
-    val maxSearchApiDetails: Int = 10
+    val maxSearchApiDetails: Int = 10,
+    val loginStatus: String = "Unknown",
+    val loginMessage: String? = null,
+    val loginCookiePresent: Boolean = false,
+    val loginCookieNames: List<String> = emptyList()
 )
 
 object IwaraMatchNetworkDefaults {

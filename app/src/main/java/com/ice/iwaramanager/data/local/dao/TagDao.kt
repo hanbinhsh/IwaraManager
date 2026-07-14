@@ -31,6 +31,9 @@ interface TagDao {
     @Query("DELETE FROM video_tag WHERE videoUriString IN (:videoUriStrings)")
     suspend fun deleteTagsForVideos(videoUriStrings: List<String>)
 
+    @Query("UPDATE video_tag SET videoUriString = :newUriString WHERE videoUriString = :oldUriString")
+    suspend fun migrateVideoUri(oldUriString: String, newUriString: String)
+
     @Query(
         """
         SELECT t.`key` AS itemKey, t.name AS label, COUNT(*) AS count

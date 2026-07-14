@@ -8,4 +8,6 @@ object Routes {
     const val Player = "player"
     const val Match = "match"
     const val MatchTaskDetail = "match_task_detail"
+    const val IwaraLogin = "iwara_login"
+    const val IwaraWebView = "iwara_web_view"
 }

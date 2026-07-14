@@ -10,10 +10,12 @@ import androidx.room.PrimaryKey
         Index(value = ["libraryRootUriString"]),
         Index(value = ["sourceId"]),
         Index(value = ["sourceId", "parentPath"]),
+        Index(value = ["sourceId", "updatedAt"]),
         Index(value = ["matchedIwaraId"]),
         Index(value = ["matchStatus"]),
         Index(value = ["remoteAuthorUsername"]),
-        Index(value = ["quality"])
+        Index(value = ["quality"]),
+        Index(value = ["displayName", "fileSize"])
     ]
 )
 data class VideoEntity(

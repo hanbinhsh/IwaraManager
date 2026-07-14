@@ -28,6 +28,9 @@ interface MatchTaskDao {
     @Query("SELECT * FROM match_task WHERE (:sourceCount = 0 OR libraryRootUriString IN (:sourceIds)) AND status IN (:statuses) ORDER BY updatedAt DESC, id DESC")
     fun observeTasksByStatusesForSourceIds(sourceIds: List<String>, sourceCount: Int, statuses: List<String>): Flow<List<MatchTaskEntity>>
 
+    @Query("SELECT * FROM match_task WHERE (:sourceCount = 0 OR libraryRootUriString IN (:sourceIds)) AND status IN (:statuses) ORDER BY updatedAt DESC, id DESC")
+    suspend fun getTasksByStatusesForSourceIds(sourceIds: List<String>, sourceCount: Int, statuses: List<String>): List<MatchTaskEntity>
+
     @Query("SELECT status, COUNT(*) AS count FROM match_task WHERE libraryRootUriString = :libraryRootUriString GROUP BY status")
     fun observeStatusCounts(libraryRootUriString: String): Flow<List<MatchTaskStatusCount>>
 
@@ -54,6 +57,28 @@ interface MatchTaskDao {
 
     @Query("SELECT * FROM match_task WHERE videoUriString = :videoUriString ORDER BY updatedAt DESC")
     suspend fun getTasksByVideoUri(videoUriString: String): List<MatchTaskEntity>
+
+    @Query(
+        """
+        UPDATE match_task SET
+            libraryRootUriString = :libraryRootUriString,
+            videoUriString = :newUriString,
+            displayName = :displayName,
+            coverFilePath = COALESCE(:coverFilePath, coverFilePath),
+            localDurationMs = COALESCE(:localDurationMs, localDurationMs),
+            updatedAt = :updatedAt
+        WHERE videoUriString = :oldUriString
+        """
+    )
+    suspend fun migrateVideoUri(
+        oldUriString: String,
+        newUriString: String,
+        libraryRootUriString: String,
+        displayName: String,
+        coverFilePath: String?,
+        localDurationMs: Long?,
+        updatedAt: Long
+    )
 
     @Query("DELETE FROM match_candidate WHERE taskId = :taskId")
     suspend fun deleteCandidatesForTask(taskId: Long)
