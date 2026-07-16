@@ -1,16 +1,12 @@
 package com.ice.iwaramanager.domain.scanner
 
 import android.content.Context
-import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import com.ice.iwaramanager.domain.util.NaturalOrder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.io.File
-import java.io.FileOutputStream
-import kotlin.math.absoluteValue
 
 class VideoScanner(
     private val context: Context
@@ -63,8 +59,13 @@ class VideoScanner(
             val fileSize = file.length()
             val lastModified = file.lastModified()
             onProgress(ScanProgress(done = index, total = sortedFiles.size, currentName = name))
-            val needsMetadata = needsMetadata(known[uriString], fileSize, lastModified)
-            val metadata = if (needsMetadata) readMetadataAndCover(file.uri, name) else ScanMetadata(null, null, null, null)
+            val knownVideo = known[uriString]
+            val needsMetadata = needsMetadata(knownVideo, fileSize, lastModified)
+            val metadata = if (needsMetadata) {
+                readMetadataAndCover(file.uri, name, knownVideo?.coverFilePath)
+            } else {
+                ScanMetadata(null, null, null, null)
+            }
             onVideo(
                 ScannedVideo(
                     displayName = name,
@@ -88,24 +89,43 @@ class VideoScanner(
     private fun needsMetadata(known: KnownVideo?, fileSize: Long, lastModified: Long): Boolean {
         if (known == null) return true
         val unchanged = known.fileSize == fileSize && known.lastModified == lastModified
-        val coverOk = !known.coverFilePath.isNullOrBlank() && File(known.coverFilePath).exists()
+        val coverOk = VideoMediaSupport.usableCoverPath(known.coverFilePath) != null
         return !(unchanged && known.hasDuration && coverOk)
+    }
+
+    suspend fun ensureCover(
+        uri: Uri,
+        videoName: String,
+        existingCoverPath: String?
+    ): String? = withContext(Dispatchers.IO) {
+        VideoMediaSupport.usableCoverPath(existingCoverPath)
+            ?: VideoMediaSupport.usableCoverPath(
+                VideoMediaSupport.coverFile(context, uri.toString(), videoName).absolutePath
+            )
+            ?: readMetadataAndCover(uri, videoName, null).coverPath
     }
 
     /**
      * 单次打开 MediaMetadataRetriever，一并读取时长/宽高并抽取封面，避免对同一文件 setDataSource 两次。
      * 封面文件已存在则跳过抽帧。
      */
-    private fun readMetadataAndCover(uri: Uri, videoName: String): ScanMetadata {
+    private fun readMetadataAndCover(
+        uri: Uri,
+        videoName: String,
+        existingCoverPath: String?
+    ): ScanMetadata {
         val coverFile = VideoMediaSupport.coverFile(context, uri.toString(), videoName)
-        val existingCover = coverFile.takeIf { it.exists() && it.length() > 0L }?.absolutePath
+        val existingCover = VideoMediaSupport.usableCoverPath(existingCoverPath)
+            ?: VideoMediaSupport.usableCoverPath(coverFile.absolutePath)
         val retriever = MediaMetadataRetriever()
         return try {
             retriever.setDataSource(context, uri)
             val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
             val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull()
             val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull()
-            val coverPath = existingCover ?: VideoMediaSupport.extractCover(retriever, coverFile)
+            val coverPath = existingCover
+                ?: VideoMediaSupport.extractContentCover(context, uri, coverFile)
+                ?: VideoMediaSupport.extractCover(retriever, coverFile)
             ScanMetadata(durationMs, width, height, coverPath)
         } catch (_: Exception) {
             ScanMetadata(null, null, null, existingCover)

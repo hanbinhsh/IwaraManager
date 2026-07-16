@@ -2,7 +2,11 @@ package com.ice.iwaramanager.domain.scanner
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
+import android.net.Uri
+import android.os.Build
+import android.util.Size
 import java.io.File
 import java.io.FileOutputStream
 import kotlin.math.absoluteValue
@@ -36,20 +40,60 @@ object VideoMediaSupport {
         return File(coverDir, "${key.hashCode().absoluteValue}_${safeName}.jpg")
     }
 
+    fun usableCoverPath(path: String?): String? {
+        if (path.isNullOrBlank()) return null
+        return runCatching {
+            File(path).takeIf { it.isFile && it.length() > 0L }?.absolutePath
+        }.getOrNull()
+    }
+
     fun extractCover(
         retriever: MediaMetadataRetriever,
         coverFile: File
     ): String? = try {
-        val bitmap = retriever.getFrameAtTime(
-            1_000_000L,
-            MediaMetadataRetriever.OPTION_CLOSEST_SYNC
-        ) ?: retriever.frameAtTime ?: return null
-        FileOutputStream(coverFile).use { output ->
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 82, output)
+        val embedded = retriever.embeddedPicture?.let { bytes ->
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
         }
-        bitmap.recycle()
-        coverFile.absolutePath
+        val bitmap = embedded
+            ?: retriever.getFrameAtTime(1_000_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            ?: retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            ?: retriever.getFrameAtTime(1_000_000L, MediaMetadataRetriever.OPTION_CLOSEST)
+            ?: retriever.frameAtTime
+            ?: return null
+        writeCover(bitmap, coverFile)
     } catch (_: Exception) {
         null
+    }
+
+    fun extractContentCover(
+        context: Context,
+        uri: Uri,
+        coverFile: File
+    ): String? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+        return try {
+            val bitmap = context.contentResolver.loadThumbnail(
+                uri,
+                Size(640, 360),
+                null
+            )
+            writeCover(bitmap, coverFile)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun writeCover(bitmap: Bitmap, coverFile: File): String? {
+        return try {
+            FileOutputStream(coverFile).use { output ->
+                check(bitmap.compress(Bitmap.CompressFormat.JPEG, 82, output))
+            }
+            coverFile.absolutePath
+        } catch (_: Exception) {
+            coverFile.delete()
+            null
+        } finally {
+            bitmap.recycle()
+        }
     }
 }

@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -107,7 +108,11 @@ fun DetailScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            HeaderCard(video)
+            HeaderCard(
+                video = video,
+                isRepairingCover = state.isRepairingCover,
+                coverRepairError = state.coverRepairError
+            )
 
             ActionRow(
                 video = video,
@@ -155,7 +160,9 @@ fun DetailScreen(
 
 @Composable
 private fun HeaderCard(
-    video: VideoItem
+    video: VideoItem,
+    isRepairingCover: Boolean,
+    coverRepairError: String?
 ) {
     ElevatedCard(
         modifier = Modifier.fillMaxWidth(),
@@ -170,6 +177,8 @@ private fun HeaderCard(
         ) {
             VideoPreview(
                 video = video,
+                isRepairingCover = isRepairingCover,
+                coverRepairError = coverRepairError,
                 modifier = Modifier
                     .width(148.dp)
                     .height(83.dp)
@@ -561,13 +570,17 @@ private fun AuthorAvatar(
 @Composable
 private fun VideoPreview(
     video: VideoItem,
+    isRepairingCover: Boolean,
+    coverRepairError: String?,
     modifier: Modifier
 ) {
-    val coverPath = video.coverFilePath
+    val coverFile = video.coverFilePath
+        ?.let(::File)
+        ?.takeIf { it.isFile && it.length() > 0L }
 
-    if (coverPath != null) {
+    if (coverFile != null) {
         AsyncImage(
-            model = File(coverPath),
+            model = coverFile,
             contentDescription = video.displayName,
             contentScale = ContentScale.Crop,
             modifier = modifier
@@ -581,11 +594,15 @@ private fun VideoPreview(
                 .background(MaterialTheme.colorScheme.surfaceVariant),
             contentAlignment = Alignment.Center
         ) {
-            Text(
-                text = "无预览",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            if (isRepairingCover) {
+                CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
+            } else {
+                Text(
+                    text = if (coverRepairError == null) "无预览" else "预览生成失败",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
     }
 }

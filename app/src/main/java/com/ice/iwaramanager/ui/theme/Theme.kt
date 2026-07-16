@@ -1,8 +1,11 @@
 package com.ice.iwaramanager.ui.theme
 
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 
 private val DarkColors = darkColorScheme(
@@ -35,8 +38,12 @@ private val DarkColors = darkColorScheme(
 fun IwaraManagerTheme(
     content: @Composable () -> Unit
 ) {
-    MaterialTheme(
-        colorScheme = DarkColors,
-        content = content
-    )
+    MaterialTheme(colorScheme = DarkColors) {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = MaterialTheme.colorScheme.background
+        ) {
+            content()
+        }
+    }
 }

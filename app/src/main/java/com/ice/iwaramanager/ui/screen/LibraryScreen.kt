@@ -1066,13 +1066,6 @@ private fun MatchTaskContent(
 ) {
     var showStartBatchDialog by remember { mutableStateOf(false) }
     var showBatchRematchDialog by remember { mutableStateOf(false) }
-    val taskVideoByUri = remember(
-        state.directoryVideos,
-        state.unqueuedVideos
-    ) {
-        (state.directoryVideos + state.unqueuedVideos)
-            .associateBy { it.uriString }
-    }
     if (showStartBatchDialog) {
         AlertDialog(
             onDismissRequest = { showStartBatchDialog = false },
@@ -1179,10 +1172,9 @@ private fun MatchTaskContent(
             item { EmptyTaskText("没有任务。") }
         } else {
             items(state.matchTasks, key = { it.id }) { task ->
-                val currentVideo = taskVideoByUri[task.videoUriString]
                 MatchTaskItem(
                     task = task,
-                    coverPath = currentVideo?.coverFilePath ?: task.coverFilePath,
+                    coverPath = task.coverFilePath,
                     onOpen = { onOpenTask(task) },
                     onSkip = if (state.taskFilter == MatchTaskFilter.Failed) {
                         { onSkipTask(task) }

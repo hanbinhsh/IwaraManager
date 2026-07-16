@@ -30,6 +30,7 @@ import com.ice.iwaramanager.data.remote.IwaraSessionManager
 import com.ice.iwaramanager.data.repository.IwaraMetadataRepository
 import com.ice.iwaramanager.data.repository.VideoRepository
 import com.ice.iwaramanager.domain.scanner.LibraryScanCoordinator
+import com.ice.iwaramanager.domain.scanner.VideoMediaSupport
 import com.ice.iwaramanager.playback.RemotePlaybackProxyService
 import androidx.paging.PagingData
 import androidx.paging.cachedIn
@@ -321,6 +322,7 @@ class AppViewModel(
     private var observeTaskCountsJob: Job? = null
     private var observeTaskDetailJob: Job? = null
     private var observeTaskCandidatesJob: Job? = null
+    private var detailCoverJob: Job? = null
     private val scanCoordinator = LibraryScanCoordinator(viewModelScope)
 
     init {
@@ -460,14 +462,50 @@ class AppViewModel(
 
     fun openVideoDetail(video: VideoItem) {
         // 先用列表项（轻量，可能缺少简介/标签等大字段）即时显示，
-        // 再按 URI 拉取完整记录补全详情页所需的 remote* 字段。
-        _detailState.update {
-            it.copy(video = video)
-        }
-        viewModelScope.launch {
-            runCatching { videoRepository.findVideoByUri(video.uriString) }
-                .getOrNull()
-                ?.let { full -> _detailState.update { it.copy(video = full) } }
+        // 再按 URI 拉取完整记录，并在封面文件丢失时后台按需补图。
+        detailCoverJob?.cancel()
+        val needsCover = VideoMediaSupport.usableCoverPath(video.coverFilePath) == null
+        _detailState.value = VideoDetailUiState(
+            video = video,
+            isRepairingCover = needsCover
+        )
+        detailCoverJob = viewModelScope.launch {
+            val full = runCatching { videoRepository.findVideoByUri(video.uriString) }
+                .getOrNull() ?: video
+            if (_detailState.value.video?.uriString != video.uriString) return@launch
+
+            val fullNeedsCover = VideoMediaSupport.usableCoverPath(full.coverFilePath) == null
+            _detailState.update {
+                it.copy(
+                    video = full,
+                    isRepairingCover = fullNeedsCover,
+                    coverRepairError = null
+                )
+            }
+            if (!fullNeedsCover) return@launch
+
+            runCatching { videoRepository.ensureVideoCover(video.uriString) }
+                .onSuccess { repaired ->
+                    if (_detailState.value.video?.uriString == video.uriString) {
+                        _detailState.update {
+                            it.copy(
+                                video = repaired,
+                                isRepairingCover = false,
+                                coverRepairError = null
+                            )
+                        }
+                    }
+                }
+                .onFailure { error ->
+                    if (_detailState.value.video?.uriString == video.uriString) {
+                        _detailState.update {
+                            it.copy(
+                                isRepairingCover = false,
+                                coverRepairError = error.message ?: "预览图生成失败"
+                            )
+                        }
+                    }
+                }
         }
     }
 
@@ -1818,6 +1856,7 @@ class AppViewModel(
         observeTaskCountsJob?.cancel()
         observeTaskDetailJob?.cancel()
         observeTaskCandidatesJob?.cancel()
+        detailCoverJob?.cancel()
         scanCoordinator.cancel()
     }
 

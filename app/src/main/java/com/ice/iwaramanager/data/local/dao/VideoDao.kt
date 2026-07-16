@@ -7,6 +7,20 @@ import androidx.room.Upsert
 import com.ice.iwaramanager.data.local.entity.VideoEntity
 import kotlinx.coroutines.flow.Flow
 
+private const val ACTIVE_VIDEO_FILTER = """
+AND (
+    NOT EXISTS (SELECT 1 FROM library_source)
+    OR EXISTS (
+        SELECT 1 FROM library_source AS active_source
+        WHERE active_source.id = video.sourceId
+        AND (
+            active_source.lastCompletedScanAt IS NULL
+            OR video.lastSeenAt >= active_source.lastCompletedScanAt
+        )
+    )
+)
+"""
+
 @Dao
 interface VideoDao {
     @Query(
@@ -14,6 +28,7 @@ interface VideoDao {
         SELECT * FROM video
         WHERE sourceId = :sourceId
         AND COALESCE(parentPath, '') = :parentPath
+        """ + ACTIVE_VIDEO_FILTER + """
         ORDER BY
             CASE WHEN :sortMode = 'NameAsc' THEN COALESCE(title, displayName) END COLLATE NOCASE ASC,
             CASE WHEN :sortMode = 'NameDesc' THEN COALESCE(title, displayName) END COLLATE NOCASE DESC,
@@ -35,6 +50,7 @@ interface VideoDao {
                width, height, coverFilePath, matchedIwaraId, matchStatus
         FROM video
         WHERE (:sourceCount = 0 OR sourceId IN (:sourceIds))
+        """ + ACTIVE_VIDEO_FILTER + """
         AND (:authorKeyCount = 0 OR COALESCE(remoteAuthorUsername, remoteAuthorId, remoteAuthorName, '') IN (:authorKeys))
         AND (:qualityCount = 0 OR COALESCE(quality, '') IN (:qualities))
         AND (:tagCount = 0 OR uriString IN (
@@ -69,6 +85,7 @@ interface VideoDao {
         """
         SELECT COUNT(*) FROM video
         WHERE (:sourceCount = 0 OR sourceId IN (:sourceIds))
+        """ + ACTIVE_VIDEO_FILTER + """
         AND (:authorKeyCount = 0 OR COALESCE(remoteAuthorUsername, remoteAuthorId, remoteAuthorName, '') IN (:authorKeys))
         AND (:qualityCount = 0 OR COALESCE(quality, '') IN (:qualities))
         AND (:tagCount = 0 OR uriString IN (
@@ -95,6 +112,7 @@ interface VideoDao {
                width, height, coverFilePath, matchedIwaraId, matchStatus
         FROM video
         WHERE (:sourceCount = 0 OR sourceId IN (:sourceIds))
+        """ + ACTIVE_VIDEO_FILTER + """
         AND (
             displayName LIKE '%' || :query || '%'
             OR title LIKE '%' || :query || '%'
@@ -123,6 +141,7 @@ interface VideoDao {
         """
         SELECT COUNT(*) FROM video
         WHERE (:sourceCount = 0 OR sourceId IN (:sourceIds))
+        """ + ACTIVE_VIDEO_FILTER + """
         AND (
             displayName LIKE '%' || :query || '%'
             OR title LIKE '%' || :query || '%'
@@ -144,6 +163,7 @@ interface VideoDao {
                COUNT(*) AS count
         FROM video
         WHERE (:sourceCount = 0 OR sourceId IN (:sourceIds))
+        """ + ACTIVE_VIDEO_FILTER + """
         AND matchedIwaraId IS NOT NULL
         AND COALESCE(remoteAuthorUsername, remoteAuthorId, remoteAuthorName, '') != ''
         GROUP BY itemKey, label
@@ -159,6 +179,7 @@ interface VideoDao {
                COUNT(*) AS count
         FROM video
         WHERE (:sourceCount = 0 OR sourceId IN (:sourceIds))
+        """ + ACTIVE_VIDEO_FILTER + """
         GROUP BY itemKey, label
         ORDER BY count DESC, label ASC
         """
@@ -169,6 +190,7 @@ interface VideoDao {
         """
         SELECT * FROM video
         WHERE (:sourceCount = 0 OR sourceId IN (:sourceIds))
+        """ + ACTIVE_VIDEO_FILTER + """
         AND (matchedIwaraId IS NULL OR matchedIwaraId = '')
         AND uriString NOT IN (SELECT videoUriString FROM match_task WHERE (:sourceCount = 0 OR libraryRootUriString IN (:sourceIds)))
         ORDER BY updatedAt DESC
@@ -180,6 +202,7 @@ interface VideoDao {
         """
         SELECT COUNT(*) FROM video
         WHERE (:sourceCount = 0 OR sourceId IN (:sourceIds))
+        """ + ACTIVE_VIDEO_FILTER + """
         AND (matchedIwaraId IS NULL OR matchedIwaraId = '')
         AND uriString NOT IN (SELECT videoUriString FROM match_task WHERE (:sourceCount = 0 OR libraryRootUriString IN (:sourceIds)))
         """
@@ -190,6 +213,7 @@ interface VideoDao {
         """
         SELECT * FROM video
         WHERE (:sourceCount = 0 OR sourceId IN (:sourceIds))
+        """ + ACTIVE_VIDEO_FILTER + """
         AND (matchedIwaraId IS NULL OR matchedIwaraId = '')
         AND uriString NOT IN (SELECT videoUriString FROM match_task WHERE (:sourceCount = 0 OR libraryRootUriString IN (:sourceIds)))
         ORDER BY updatedAt DESC
@@ -201,6 +225,7 @@ interface VideoDao {
         """
         SELECT * FROM video
         WHERE (:sourceCount = 0 OR sourceId IN (:sourceIds))
+        """ + ACTIVE_VIDEO_FILTER + """
         AND matchedIwaraId IS NOT NULL AND matchedIwaraId != ''
         ORDER BY updatedAt DESC
         """
@@ -211,6 +236,7 @@ interface VideoDao {
         """
         SELECT * FROM video
         WHERE (:sourceCount = 0 OR sourceId IN (:sourceIds))
+        """ + ACTIVE_VIDEO_FILTER + """
         AND ((matchedIwaraId IS NOT NULL AND matchedIwaraId != '') OR (sourceVideoId IS NOT NULL AND sourceVideoId != ''))
         ORDER BY updatedAt DESC
         """
@@ -221,6 +247,7 @@ interface VideoDao {
         """
         SELECT * FROM video
         WHERE (:sourceCount = 0 OR sourceId IN (:sourceIds))
+        """ + ACTIVE_VIDEO_FILTER + """
         AND matchedIwaraId IS NOT NULL AND matchedIwaraId != ''
         AND (
             remoteDurationSeconds IS NULL
@@ -292,6 +319,7 @@ interface VideoDao {
         """
         SELECT COUNT(*) FROM video
         WHERE (:sourceCount = 0 OR sourceId IN (:sourceIds))
+        """ + ACTIVE_VIDEO_FILTER + """
         """
     )
     fun observeVideoCountForSourceIds(sourceIds: List<String>, sourceCount: Int): kotlinx.coroutines.flow.Flow<Int>
@@ -345,6 +373,9 @@ interface VideoDao {
 
     @Upsert
     suspend fun upsertAll(videos: List<VideoEntity>)
+
+    @Query("UPDATE video SET coverFilePath = :coverFilePath WHERE uriString = :uriString")
+    suspend fun updateCover(uriString: String, coverFilePath: String)
 
     @Query("DELETE FROM video WHERE uriString IN (:uris)")
     suspend fun deleteByUris(uris: List<String>)

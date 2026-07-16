@@ -113,7 +113,9 @@ data class SettingsUiState(
 )
 
 data class VideoDetailUiState(
-    val video: VideoItem? = null
+    val video: VideoItem? = null,
+    val isRepairingCover: Boolean = false,
+    val coverRepairError: String? = null
 )
 
 data class PlayerUiState(

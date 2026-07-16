@@ -37,6 +37,7 @@ import com.ice.iwaramanager.domain.parser.IwaraFilenameParser
 import com.ice.iwaramanager.domain.scanner.KnownVideo
 import com.ice.iwaramanager.domain.scanner.ScanProgress
 import com.ice.iwaramanager.domain.scanner.ScannedVideo
+import com.ice.iwaramanager.domain.scanner.VideoMediaSupport
 import com.ice.iwaramanager.domain.scanner.VideoScanner
 import com.ice.iwaramanager.domain.scanner.WebDavVideoScanner
 import com.ice.iwaramanager.domain.security.WebDavCredentialStore
@@ -551,6 +552,44 @@ class VideoRepository(context: Context) {
     }
 
     suspend fun findVideoByUri(uriString: String): VideoItem? = videoDao.findByUri(uriString)?.toVideoItem()
+
+    suspend fun ensureVideoCover(uriString: String): VideoItem = withContext(Dispatchers.IO) {
+        val video = videoDao.findByUri(uriString) ?: error("视频记录不存在")
+        VideoMediaSupport.usableCoverPath(video.coverFilePath)?.let {
+            return@withContext video.toVideoItem()
+        }
+
+        val source = sourceDao.getSource(video.sourceId)?.toLibrarySource()
+        val coverPath = when (source?.type) {
+            LibrarySourceType.WebDav -> webDavScanner.ensureCover(
+                source = source,
+                password = credentialStore.loadPassword(source.id),
+                remoteUrl = video.uriString,
+                displayName = video.displayName,
+                existingCoverPath = video.coverFilePath
+            )
+
+            LibrarySourceType.LocalSaf, null -> {
+                if (!video.uriString.startsWith("content://")) {
+                    error("远程来源配置已被移除，无法补全预览图")
+                }
+                scanner.ensureCover(
+                    uri = Uri.parse(video.uriString),
+                    videoName = video.displayName,
+                    existingCoverPath = video.coverFilePath
+                )
+            }
+        }
+
+        val validCoverPath = VideoMediaSupport.usableCoverPath(coverPath)
+            ?: error("无法从该视频提取预览图")
+        db.withTransaction {
+            videoDao.updateCover(video.uriString, validCoverPath)
+            matchTaskDao.updateCoverForVideo(video.uriString, validCoverPath)
+        }
+        videoDao.findByUri(video.uriString)?.toVideoItem()
+            ?: error("预览图已生成，但视频记录不存在")
+    }
 
     suspend fun createMatchTask(video: VideoItem, libraryRootUriString: String, query: String): Long {
         val now = System.currentTimeMillis()

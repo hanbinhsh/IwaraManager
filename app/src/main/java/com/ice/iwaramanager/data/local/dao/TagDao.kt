@@ -41,6 +41,17 @@ interface TagDao {
         INNER JOIN video_tag vt ON vt.tagKey = t.key
         INNER JOIN video v ON v.uriString = vt.videoUriString
         WHERE (:sourceCount = 0 OR v.sourceId IN (:sourceIds))
+        AND (
+            NOT EXISTS (SELECT 1 FROM library_source)
+            OR EXISTS (
+                SELECT 1 FROM library_source AS active_source
+                WHERE active_source.id = v.sourceId
+                AND (
+                    active_source.lastCompletedScanAt IS NULL
+                    OR v.lastSeenAt >= active_source.lastCompletedScanAt
+                )
+            )
+        )
         GROUP BY t.key, t.name
         ORDER BY count DESC, t.name ASC
         """

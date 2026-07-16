@@ -9,6 +9,48 @@ import com.ice.iwaramanager.data.local.entity.MatchCandidateEntity
 import com.ice.iwaramanager.data.local.entity.MatchTaskEntity
 import kotlinx.coroutines.flow.Flow
 
+private const val ACTIVE_TASK_VIDEO_FILTER = """
+AND (
+    NOT EXISTS (SELECT 1 FROM library_source)
+    OR EXISTS (
+        SELECT 1
+        FROM video AS active_video
+        INNER JOIN library_source AS active_source ON active_source.id = active_video.sourceId
+        WHERE active_video.uriString = match_task.videoUriString
+        AND (
+            active_source.lastCompletedScanAt IS NULL
+            OR active_video.lastSeenAt >= active_source.lastCompletedScanAt
+        )
+    )
+)
+"""
+
+private const val MATCH_TASK_WITH_CURRENT_COVER = """
+SELECT
+    match_task.id AS id,
+    match_task.libraryRootUriString AS libraryRootUriString,
+    match_task.videoUriString AS videoUriString,
+    match_task.displayName AS displayName,
+    COALESCE(
+        NULLIF((
+            SELECT current_video.coverFilePath
+            FROM video AS current_video
+            WHERE current_video.uriString = match_task.videoUriString
+            LIMIT 1
+        ), ''),
+        match_task.coverFilePath
+    ) AS coverFilePath,
+    match_task.`query` AS `query`,
+    match_task.localDurationMs AS localDurationMs,
+    match_task.status AS status,
+    match_task.matchedIwaraId AS matchedIwaraId,
+    match_task.candidateCount AS candidateCount,
+    match_task.errorMessage AS errorMessage,
+    match_task.createdAt AS createdAt,
+    match_task.updatedAt AS updatedAt
+FROM match_task
+"""
+
 data class MatchTaskStatusCount(
     val status: String,
     val count: Int
@@ -16,16 +58,43 @@ data class MatchTaskStatusCount(
 
 @Dao
 interface MatchTaskDao {
-    @Query("SELECT * FROM match_task WHERE (:sourceCount = 0 OR libraryRootUriString IN (:sourceIds)) ORDER BY updatedAt DESC, id DESC")
+    @Query(
+        MATCH_TASK_WITH_CURRENT_COVER + """
+        WHERE (:sourceCount = 0 OR libraryRootUriString IN (:sourceIds))
+        """ + ACTIVE_TASK_VIDEO_FILTER + """
+        ORDER BY updatedAt DESC, id DESC
+        """
+    )
     fun observeTasksForSourceIds(sourceIds: List<String>, sourceCount: Int): Flow<List<MatchTaskEntity>>
 
-    @Query("SELECT * FROM match_task WHERE (:sourceCount = 0 OR libraryRootUriString IN (:sourceIds)) AND status IN (:statuses) ORDER BY updatedAt DESC, id DESC")
+    @Query(
+        MATCH_TASK_WITH_CURRENT_COVER + """
+        WHERE (:sourceCount = 0 OR libraryRootUriString IN (:sourceIds))
+        """ + ACTIVE_TASK_VIDEO_FILTER + """
+        AND status IN (:statuses)
+        ORDER BY updatedAt DESC, id DESC
+        """
+    )
     fun observeTasksByStatusesForSourceIds(sourceIds: List<String>, sourceCount: Int, statuses: List<String>): Flow<List<MatchTaskEntity>>
 
-    @Query("SELECT * FROM match_task WHERE (:sourceCount = 0 OR libraryRootUriString IN (:sourceIds)) AND status IN (:statuses) ORDER BY updatedAt DESC, id DESC")
+    @Query(
+        MATCH_TASK_WITH_CURRENT_COVER + """
+        WHERE (:sourceCount = 0 OR libraryRootUriString IN (:sourceIds))
+        """ + ACTIVE_TASK_VIDEO_FILTER + """
+        AND status IN (:statuses)
+        ORDER BY updatedAt DESC, id DESC
+        """
+    )
     suspend fun getTasksByStatusesForSourceIds(sourceIds: List<String>, sourceCount: Int, statuses: List<String>): List<MatchTaskEntity>
 
-    @Query("SELECT status, COUNT(*) AS count FROM match_task WHERE (:sourceCount = 0 OR libraryRootUriString IN (:sourceIds)) GROUP BY status")
+    @Query(
+        """
+        SELECT status, COUNT(*) AS count FROM match_task
+        WHERE (:sourceCount = 0 OR libraryRootUriString IN (:sourceIds))
+        """ + ACTIVE_TASK_VIDEO_FILTER + """
+        GROUP BY status
+        """
+    )
     fun observeStatusCountsForSourceIds(sourceIds: List<String>, sourceCount: Int): Flow<List<MatchTaskStatusCount>>
 
     @Insert
@@ -37,16 +106,16 @@ interface MatchTaskDao {
     @Query("UPDATE match_task SET status = :failedStatus, errorMessage = :errorMessage, updatedAt = :updatedAt WHERE status = :runningStatus")
     suspend fun markRunningTasksAsFailed(runningStatus: String, failedStatus: String, errorMessage: String, updatedAt: Long)
 
-    @Query("SELECT * FROM match_task WHERE id = :taskId LIMIT 1")
+    @Query(MATCH_TASK_WITH_CURRENT_COVER + " WHERE match_task.id = :taskId LIMIT 1")
     suspend fun getTask(taskId: Long): MatchTaskEntity?
 
     @Query("DELETE FROM match_task WHERE id = :taskId")
     suspend fun deleteTask(taskId: Long)
 
-    @Query("SELECT * FROM match_task WHERE id = :taskId LIMIT 1")
+    @Query(MATCH_TASK_WITH_CURRENT_COVER + " WHERE match_task.id = :taskId LIMIT 1")
     fun observeTask(taskId: Long): Flow<MatchTaskEntity?>
 
-    @Query("SELECT * FROM match_task WHERE videoUriString = :videoUriString ORDER BY updatedAt DESC")
+    @Query(MATCH_TASK_WITH_CURRENT_COVER + " WHERE match_task.videoUriString = :videoUriString ORDER BY match_task.updatedAt DESC")
     suspend fun getTasksByVideoUri(videoUriString: String): List<MatchTaskEntity>
 
     @Query(
@@ -71,6 +140,9 @@ interface MatchTaskDao {
         updatedAt: Long
     )
 
+    @Query("UPDATE match_task SET coverFilePath = :coverFilePath WHERE videoUriString = :videoUriString")
+    suspend fun updateCoverForVideo(videoUriString: String, coverFilePath: String)
+
     @Query("DELETE FROM match_candidate WHERE taskId = :taskId")
     suspend fun deleteCandidatesForTask(taskId: Long)
 
@@ -84,9 +156,9 @@ interface MatchTaskDao {
     fun observeCandidatesForTask(taskId: Long): Flow<List<MatchCandidateEntity>>
 
     @Query(
-        """
-        SELECT * FROM match_task
+        MATCH_TASK_WITH_CURRENT_COVER + """
         WHERE (:sourceCount = 0 OR libraryRootUriString IN (:sourceIds))
+        """ + ACTIVE_TASK_VIDEO_FILTER + """
         AND status = :status
         AND (updatedAt < :currentUpdatedAt OR (updatedAt = :currentUpdatedAt AND id < :currentTaskId))
         ORDER BY updatedAt DESC, id DESC
@@ -102,9 +174,9 @@ interface MatchTaskDao {
     ): MatchTaskEntity?
 
     @Query(
-        """
-        SELECT * FROM match_task
+        MATCH_TASK_WITH_CURRENT_COVER + """
         WHERE (:sourceCount = 0 OR libraryRootUriString IN (:sourceIds))
+        """ + ACTIVE_TASK_VIDEO_FILTER + """
         AND status = :status
         AND id != :currentTaskId
         ORDER BY updatedAt DESC, id DESC

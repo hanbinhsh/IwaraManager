@@ -1,6 +1,7 @@
 package com.ice.iwaramanager
 
 import android.content.ActivityNotFoundException
+import android.content.ClipData
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -10,6 +11,8 @@ import android.os.Build
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -138,7 +141,11 @@ fun AppRoot(
 
     NavHost(
         navController = navController,
-        startDestination = AppRoute.Library.path
+        startDestination = AppRoute.Library.path,
+        enterTransition = { EnterTransition.None },
+        exitTransition = { ExitTransition.None },
+        popEnterTransition = { EnterTransition.None },
+        popExitTransition = { ExitTransition.None }
     ) {
         composable(AppRoute.Library.path) {
             LibraryScreen(
@@ -378,7 +385,8 @@ private fun openVideoWithExternalPlayer(
     }
 
     val source = settingsState.librarySources.firstOrNull { it.id == video.sourceId }
-    val playbackUri = if (source?.type == LibrarySourceType.WebDav) {
+    val isWebDav = source?.type == LibrarySourceType.WebDav
+    val playbackUri = if (isWebDav) {
         val password = WebDavCredentialStore(context).loadPassword(source.id)
         val headers = WebDavClient().authHeaders(source, password)
         if (!source.webDavUsername.isNullOrBlank() && headers.isEmpty()) {
@@ -407,10 +415,23 @@ private fun openVideoWithExternalPlayer(
         Uri.parse(video.uriString)
     }
 
+    if (!isWebDav) {
+        val readError = localVideoReadError(context, playbackUri)
+        if (readError != null) {
+            Toast.makeText(
+                context,
+                "视频文件已不在当前目录或目录授权已失效。请重新扫描/重新绑定目录；确认文件已删除后可在设置中清理缺失记录。$readError",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+    }
+
     val intent = Intent(Intent.ACTION_VIEW).apply {
         setDataAndType(playbackUri, videoMimeType(video))
         this.component = component
-        if (source?.type != LibrarySourceType.WebDav) {
+        if (!isWebDav) {
+            clipData = ClipData.newRawUri(video.displayName, playbackUri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
     }
@@ -419,8 +440,23 @@ private fun openVideoWithExternalPlayer(
         context.startActivity(intent)
     } catch (_: ActivityNotFoundException) {
         Toast.makeText(context, "已选择的播放器不可用", Toast.LENGTH_SHORT).show()
-    } catch (_: SecurityException) {
-        Toast.makeText(context, "无法授予外部播放器读取权限", Toast.LENGTH_SHORT).show()
+    } catch (error: SecurityException) {
+        Toast.makeText(
+            context,
+            "外部播放器无法读取该视频：${error.message ?: "URI 读取授权被拒绝"}",
+            Toast.LENGTH_LONG
+        ).show()
+    }
+}
+
+private fun localVideoReadError(context: Context, uri: Uri): String? {
+    return try {
+        val descriptor = context.contentResolver.openFileDescriptor(uri, "r")
+            ?: return "（无法打开文件描述符）"
+        descriptor.use { }
+        null
+    } catch (error: Exception) {
+        "（${error.message ?: error::class.java.simpleName}）"
     }
 }
 

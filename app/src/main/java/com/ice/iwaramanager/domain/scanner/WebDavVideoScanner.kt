@@ -1,7 +1,6 @@
 package com.ice.iwaramanager.domain.scanner
 
 import android.content.Context
-import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import com.ice.iwaramanager.data.model.LibrarySource
 import com.ice.iwaramanager.data.model.RemoteIndexMode
@@ -10,12 +9,9 @@ import com.ice.iwaramanager.playback.RemotePlaybackProxyService
 import com.ice.iwaramanager.domain.util.NaturalOrder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.io.File
-import java.io.FileOutputStream
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
-import kotlin.math.absoluteValue
 
 class WebDavVideoScanner(
     private val context: Context,
@@ -67,7 +63,8 @@ class WebDavVideoScanner(
                 if (!VideoMediaSupport.isVideoFile(entry.name)) continue
                 done += 1
                 onProgress(ScanProgress(done, 0, childPath))
-                val metadata = if (source.remoteIndexMode == RemoteIndexMode.Full && needsMetadata(known[entry.url], entry.size, entry.lastModified)) {
+                val knownVideo = known[entry.url]
+                val metadata = if (source.remoteIndexMode == RemoteIndexMode.Full && needsMetadata(knownVideo, entry.size, entry.lastModified)) {
                     val headers = client.authHeaders(source, password)
                     val metadataUrl = runCatching {
                         RemotePlaybackProxyService.createProxyUri(
@@ -83,7 +80,10 @@ class WebDavVideoScanner(
                     readRemoteMetadata(
                         url = metadataUrl,
                         headers = if (metadataUrl == entry.url) headers else emptyMap(),
-                        timeoutSeconds = source.readTimeoutSeconds
+                        timeoutSeconds = source.readTimeoutSeconds,
+                        coverKey = entry.url,
+                        coverDisplayName = entry.name,
+                        existingCoverPath = knownVideo?.coverFilePath
                     )
                 } else {
                     // 未变化或非完整索引模式：交给上层复用数据库中已有的时长与封面
@@ -111,14 +111,52 @@ class WebDavVideoScanner(
     private fun needsMetadata(known: KnownVideo?, fileSize: Long, lastModified: Long): Boolean {
         if (known == null) return true
         val unchanged = known.fileSize == fileSize && known.lastModified == lastModified
-        val coverOk = !known.coverFilePath.isNullOrBlank() && File(known.coverFilePath).exists()
+        val coverOk = VideoMediaSupport.usableCoverPath(known.coverFilePath) != null
         return !(unchanged && known.hasDuration && coverOk)
+    }
+
+    suspend fun ensureCover(
+        source: LibrarySource,
+        password: String?,
+        remoteUrl: String,
+        displayName: String,
+        existingCoverPath: String?
+    ): String? = withContext(Dispatchers.IO) {
+        VideoMediaSupport.usableCoverPath(existingCoverPath)?.let { return@withContext it }
+        VideoMediaSupport.usableCoverPath(
+            VideoMediaSupport.coverFile(context, remoteUrl, displayName).absolutePath
+        )?.let { return@withContext it }
+
+        val headers = client.authHeaders(source, password)
+        val metadataUrl = runCatching {
+            RemotePlaybackProxyService.createProxyUri(
+                context = context,
+                remoteUrl = remoteUrl,
+                headers = headers,
+                mimeType = VideoMediaSupport.mimeType(displayName),
+                readTimeoutSeconds = source.readTimeoutSeconds,
+                idleTimeoutSeconds = source.readTimeoutSeconds,
+                allowInsecureTls = source.webDavAllowInsecureTls
+            ).toString()
+        }.getOrDefault(remoteUrl)
+
+        readRemoteMetadata(
+            url = metadataUrl,
+            headers = if (metadataUrl == remoteUrl) headers else emptyMap(),
+            timeoutSeconds = source.readTimeoutSeconds,
+            coverKey = remoteUrl,
+            coverDisplayName = displayName,
+            existingCoverPath = null
+        ).coverPath
     }
 
     private fun readRemoteMetadata(
         url: String,
         headers: Map<String, String>,
-        timeoutSeconds: Int
+        timeoutSeconds: Int,
+        coverKey: String,
+        coverDisplayName: String,
+        existingCoverPath: String?
     ): RemoteMetadata {
         val retriever = MediaMetadataRetriever()
         val executor = Executors.newSingleThreadExecutor { task ->
@@ -130,7 +168,12 @@ class WebDavVideoScanner(
                 val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()
                 val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull()
                 val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull()
-                val coverPath = extractCoverToCache(retriever, url)
+                val coverPath = extractCoverToCache(
+                    retriever = retriever,
+                    coverKey = coverKey,
+                    displayName = coverDisplayName,
+                    existingCoverPath = existingCoverPath
+                )
                 RemoteMetadata(durationMs, width, height, coverPath)
             } catch (_: Exception) {
                 RemoteMetadata(null, null, null, null)
@@ -151,15 +194,21 @@ class WebDavVideoScanner(
         }
     }
 
-    private fun extractCoverToCache(retriever: MediaMetadataRetriever, url: String): String? {
+    private fun extractCoverToCache(
+        retriever: MediaMetadataRetriever,
+        coverKey: String,
+        displayName: String,
+        existingCoverPath: String?
+    ): String? {
         // 封面存放在 filesDir（持久化目录）而非 cacheDir，避免系统在存储紧张时清理缓存导致封面丢失，
         // 从而保证断开 WebDAV 后封面仍可离线显示。
+        VideoMediaSupport.usableCoverPath(existingCoverPath)?.let { return it }
         val coverFile = VideoMediaSupport.coverFile(
             context = context,
-            key = url,
-            displayName = url.substringAfterLast('/')
+            key = coverKey,
+            displayName = displayName
         )
-        if (coverFile.exists() && coverFile.length() > 0L) return coverFile.absolutePath
+        VideoMediaSupport.usableCoverPath(coverFile.absolutePath)?.let { return it }
         return VideoMediaSupport.extractCover(retriever, coverFile)
     }
 
